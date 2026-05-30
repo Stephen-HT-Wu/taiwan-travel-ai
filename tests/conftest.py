@@ -9,8 +9,10 @@ import tdx
 @pytest.fixture(autouse=True)
 def reset_tdx_token_cache():
     tdx._token_cache = None
+    tdx._station_ids_cache = None
     yield
     tdx._token_cache = None
+    tdx._station_ids_cache = None
 
 
 @pytest.fixture
@@ -38,6 +40,7 @@ def mock_httpx(monkeypatch):
     monkeypatch.setattr("tdx.httpx.post", mock_post)
     monkeypatch.setattr("tdx.httpx.get", mock_get)
     monkeypatch.setattr("cwa.httpx.get", mock_get)
+    monkeypatch.setattr("routing.httpx.get", mock_get)
     return state
 
 
@@ -75,3 +78,14 @@ def tdx_get_handler(path_fragment, payload):
         return None
 
     return handler
+
+
+def mock_tra_stations(mock_httpx, stations=None):
+    if stations is None:
+        stations = [
+            {"StationID": "1000", "StationName": {"Zh_tw": "臺北"}},
+            {"StationID": "4220", "StationName": {"Zh_tw": "臺南"}},
+        ]
+    mock_httpx["get_handlers"].append(
+        tdx_get_handler("/v3/Rail/TRA/Station", {"Stations": stations})
+    )

@@ -1,7 +1,11 @@
 "use client";
 
 import { useState, useRef, useEffect, FormEvent, KeyboardEvent } from "react";
+import dynamic from "next/dynamic";
 import styles from "./Chat.module.css";
+import type { MapPlace, MapPlaceInput } from "./mapTypes";
+
+const MapPanel = dynamic(() => import("./MapPanel"), { ssr: false });
 
 type Message = {
   role: "user" | "assistant";
@@ -49,6 +53,7 @@ export default function Chat() {
   const [phaseMessage, setPhaseMessage] = useState("");
   const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [streamingText, setStreamingText] = useState("");
+  const [mapPlaces, setMapPlaces] = useState<MapPlace[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const composingRef = useRef(false);
   const enterToConfirmImeRef = useRef(false);
@@ -73,6 +78,7 @@ export default function Chat() {
     setPhaseMessage("正在理解你的問題...");
     setActivities([]);
     setStreamingText("");
+    setMapPlaces([]);
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
 
     const currentActivities: ActivityItem[] = [];
@@ -158,6 +164,9 @@ export default function Chat() {
               };
               setActivities([...currentActivities]);
             }
+            if (parsed.places?.length) {
+              setMapPlaces((prev) => mergeMapPlaces(prev, parsed.places, parsed.id));
+            }
           } else if (event === "done") {
             if (accumulated) {
               setMessages((prev) => [
@@ -235,8 +244,9 @@ export default function Chat() {
   }
 
   return (
-    <div className={styles.container}>
-      <header className={styles.header}>
+    <div className={styles.pageLayout}>
+      <div className={styles.container}>
+        <header className={styles.header}>
         <div className={styles.logo}>🗺️</div>
         <div>
           <h1 className={styles.title}>台灣旅遊 AI 助理</h1>
@@ -336,6 +346,11 @@ export default function Chat() {
           </button>
         </div>
       </form>
+      </div>
+
+      <aside className={styles.mapColumn}>
+        <MapPanel places={mapPlaces} />
+      </aside>
     </div>
   );
 }
@@ -403,4 +418,29 @@ function isPhaseDone(step: Phase, current: Phase | null) {
   const stepIdx = order.indexOf(step);
   const currentIdx = current ? order.indexOf(current) : -1;
   return currentIdx > stepIdx;
+}
+
+function mergeMapPlaces(
+  existing: MapPlace[],
+  incoming: MapPlaceInput[],
+  toolId: string
+): MapPlace[] {
+  const merged = [...existing];
+
+  for (const [index, place] of incoming.entries()) {
+    const duplicate = merged.some(
+      (item) =>
+        item.name === place.name &&
+        item.lat === place.lat &&
+        item.lng === place.lng
+    );
+    if (duplicate) continue;
+
+    merged.push({
+      ...place,
+      id: `${toolId}-${index}-${place.name}`,
+    });
+  }
+
+  return merged;
 }

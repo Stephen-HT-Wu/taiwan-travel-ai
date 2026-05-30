@@ -1,4 +1,6 @@
-from tests.conftest import tdx_get_handler
+from tests.conftest import mock_tra_stations, tdx_get_handler
+
+import tdx
 
 from tdx import search_attractions, search_bus_routes, search_restaurants, search_train_schedule
 
@@ -15,6 +17,7 @@ def test_search_attractions_parses_tdx_response(mock_httpx):
                     "OpenTime": "08:00-21:30",
                     "Class1": "古蹟",
                     "Picture": {"PictureUrl1": "https://example.com/photo.jpg"},
+                    "Position": {"PositionLat": 22.997, "PositionLon": 120.202},
                 }
             ],
         )
@@ -26,6 +29,8 @@ def test_search_attractions_parses_tdx_response(mock_httpx):
     assert results[0]["name"] == "赤崁樓"
     assert results[0]["category"] == "古蹟"
     assert results[0]["image"] == "https://example.com/photo.jpg"
+    assert results[0]["lat"] == 22.997
+    assert results[0]["lng"] == 120.202
 
 
 def test_search_restaurants_parses_tdx_response(mock_httpx):
@@ -78,14 +83,61 @@ def test_search_bus_routes_parses_subroutes(mock_httpx):
     assert results[0]["to"] == "西門"
 
 
-def test_search_train_schedule_unknown_station_returns_error():
+def test_search_train_schedule_unknown_station_returns_error(mock_httpx):
+    mock_tra_stations(mock_httpx)
     results = search_train_schedule("不存在", "台南")
 
     assert results[0]["error"]
-    assert "支援的站名" in results[0]["error"]
+    assert "不支援的站名" in results[0]["error"]
+
+
+def test_get_station_ids_loads_tra_stations_and_aliases(mock_httpx):
+    mock_tra_stations(mock_httpx, [
+        {"StationID": "1000", "StationName": {"Zh_tw": "臺北"}},
+        {"StationID": "7210", "StationName": {"Zh_tw": "礁溪"}},
+    ])
+
+    station_ids = tdx.get_station_ids()
+
+    assert station_ids["臺北"] == "1000"
+    assert station_ids["台北"] == "1000"
+    assert station_ids["礁溪"] == "7210"
 
 
 def test_search_train_schedule_parses_tdx_response(mock_httpx):
+    mock_tra_stations(mock_httpx)
+    mock_httpx["get_handlers"].append(
+        tdx_get_handler(
+            "/v3/Rail/TRA/DailyTrainTimetable/OD/1000/to/4220/",
+            {
+                "TrainDate": "2026-06-01",
+                "TrainTimetables": [
+                    {
+                        "TrainInfo": {
+                            "TrainNo": "133",
+                            "TrainTypeName": {"Zh_tw": "自強"},
+                            "JourneyTime": 240,
+                        },
+                        "StopTimes": [
+                            {"DepartureTime": "08:00"},
+                            {"ArrivalTime": "12:00"},
+                        ],
+                    }
+                ],
+            },
+        )
+    )
+
+    results = search_train_schedule("台北", "台南", travel_date="2026-06-01", limit=1)
+
+    assert results[0]["train_no"] == "133"
+    assert results[0]["train_type"] == "自強"
+    assert results[0]["departure_time"] == "08:00"
+    assert results[0]["arrival_time"] == "12:00"
+
+
+def test_search_train_schedule_supports_legacy_daily_train_info(mock_httpx):
+    mock_tra_stations(mock_httpx)
     mock_httpx["get_handlers"].append(
         tdx_get_handler(
             "/v3/Rail/TRA/DailyTrainTimetable/OD/1000/to/4220/",
@@ -93,7 +145,7 @@ def test_search_train_schedule_parses_tdx_response(mock_httpx):
                 {
                     "DailyTrainInfo": {
                         "TrainNo": "133",
-                        "TrainTypeName": {"Zh_tw": "自強"},
+                        "TrainTypeName": "區間",
                         "JourneyTime": 240,
                         "StopTimes": [
                             {"DepartureTime": "08:00"},
@@ -108,5 +160,4 @@ def test_search_train_schedule_parses_tdx_response(mock_httpx):
     results = search_train_schedule("台北", "台南", travel_date="2026-06-01", limit=1)
 
     assert results[0]["train_no"] == "133"
-    assert results[0]["departure_time"] == "08:00"
-    assert results[0]["arrival_time"] == "12:00"
+    assert results[0]["train_type"] == "區間"

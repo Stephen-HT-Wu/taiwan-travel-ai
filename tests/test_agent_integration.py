@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from agent import execute_tool, stream_agent, summarize_tool_result
+from agent import execute_tool, extract_map_places, stream_agent, summarize_tool_result
 from tests.conftest import FakeAnthropicStream, tdx_get_handler
 
 
@@ -15,7 +15,7 @@ def test_execute_tool_search_attractions_via_mock(mock_httpx):
     mock_httpx["get_handlers"].append(
         tdx_get_handler(
             "/v2/Tourism/ScenicSpot/Tainan",
-            [{"ScenicSpotName": "安平古堡", "Picture": {}}],
+            [{"ScenicSpotName": "安平古堡", "Picture": {}, "Position": {"PositionLat": 23.0, "PositionLon": 120.16}}],
         )
     )
 
@@ -48,6 +48,40 @@ def test_summarize_tool_result_for_weather():
     assert "臺北市" in summary["summary"]
 
 
+def test_summarize_tool_result_for_travel_route():
+    summary = summarize_tool_result(
+        "get_travel_route",
+        {
+            "mode_label": "步行",
+            "duration_minutes": 25,
+            "distance_km": 2.1,
+            "origin": {"query": "捷運中山站"},
+            "destination": {"query": "雙城街觀光夜市"},
+        },
+    )
+
+    assert summary["ok"] is True
+    assert "25" in summary["summary"]
+    assert "步行" in summary["summary"]
+
+
+def test_extract_map_places_from_attractions():
+    places = extract_map_places(
+        "search_attractions",
+        [{"name": "赤崁樓", "lat": 22.997, "lng": 120.202, "address": "臺南市"}],
+    )
+
+    assert len(places) == 1
+    assert places[0]["type"] == "attraction"
+    assert places[0]["name"] == "赤崁樓"
+
+
+def test_extract_map_places_skips_items_without_coordinates():
+    places = extract_map_places("search_restaurants", [{"name": "無座標"}])
+
+    assert places == []
+
+
 def test_stream_agent_end_turn_emits_sse_events(monkeypatch):
     text_block = SimpleNamespace(type="text", text="台南很好玩")
     final_message = SimpleNamespace(
@@ -75,7 +109,7 @@ def test_stream_agent_tool_use_emits_tool_events(monkeypatch, mock_httpx):
     mock_httpx["get_handlers"].append(
         tdx_get_handler(
             "/v2/Tourism/ScenicSpot/Tainan",
-            [{"ScenicSpotName": "赤崁樓", "Picture": {}}],
+            [{"ScenicSpotName": "赤崁樓", "Picture": {}, "Position": {"PositionLat": 22.997, "PositionLon": 120.202}}],
         )
     )
 
@@ -108,3 +142,5 @@ def test_stream_agent_tool_use_emits_tool_events(monkeypatch, mock_httpx):
     assert tool_end["data"]["ok"] is True
     assert tool_end["data"]["count"] == 1
     assert "赤崁樓" in tool_end["data"]["preview"]
+    assert len(tool_end["data"]["places"]) == 1
+    assert tool_end["data"]["places"][0]["lat"] == 22.997

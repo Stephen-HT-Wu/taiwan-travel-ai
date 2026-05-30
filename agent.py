@@ -7,6 +7,7 @@ import anthropic
 
 from tdx import search_attractions, search_restaurants, search_bus_routes, search_train_schedule
 from cwa import get_weather_forecast
+from routing import get_travel_route
 
 load_dotenv(override=True)
 
@@ -82,7 +83,7 @@ tools = [
     },
     {
         "name": "search_train_schedule",
-        "description": "查詢台鐵兩站之間的列車時刻表",
+        "description": "查詢台鐵兩站之間的列車時刻表。支援所有台鐵正式站名（約 245 站，台北/臺北等別名皆可）",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -103,11 +104,53 @@ tools = [
             "required": ["origin", "destination"],
         },
     },
+    {
+        "name": "get_travel_route",
+        "description": (
+            "查詢兩地之間的步行、開車或騎車路線時間與距離。"
+            "使用者問「A 到 B 要多久、多遠」時必須使用此工具，不可自行估算。"
+            "地點請用中文具體名稱（例如 捷運中山站 中山區、雙城街夜市）。"
+            "若先前工具已回傳 lat/lng，可一併傳入以提升準確度。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string",
+                    "description": "起點中文名稱，例如 捷運中山站",
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "終點中文名稱，例如 雙城街觀光夜市",
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "交通方式：walking（步行，預設）、driving（開車）、cycling（騎車）",
+                },
+                "near": {
+                    "type": "string",
+                    "description": "地點所在區域提示，預設 台北市，例如 台北市、臺南市",
+                },
+                "origin_lat": {"type": "number", "description": "起點緯度（可選）"},
+                "origin_lng": {"type": "number", "description": "起點經度（可選）"},
+                "destination_lat": {"type": "number", "description": "終點緯度（可選）"},
+                "destination_lng": {"type": "number", "description": "終點經度（可選）"},
+            },
+            "required": ["origin", "destination"],
+        },
+    },
 ]
 
 SYSTEM_PROMPT = """你是一個台灣旅遊規劃助理。
 當使用者詢問景點、美食、天氣或交通時，使用對應工具查詢真實資料，再根據資料給出建議。
 規劃行程時，可綜合天氣、景點、餐廳與交通資訊。
+
+交通時間與距離規則：
+- 使用者問兩地之間「多久、多遠、怎麼走」時，必須呼叫 get_travel_route，不可憑記憶估算分鐘數。
+- 沒有工具資料時，明確告知無法提供精確時間，不要猜測。
+- 回覆時說明交通方式（步行/開車/騎車），並提及 OSRM 估算不含等車或轉乘。
+- 捷運、公車轉乘請另外說明需另行查詢，不要與步行時間混淆。
+
 回答時用繁體中文，口吻親切自然。"""
 
 TOOL_HANDLERS = {
@@ -116,6 +159,7 @@ TOOL_HANDLERS = {
     "get_weather_forecast": get_weather_forecast,
     "search_bus_routes": search_bus_routes,
     "search_train_schedule": search_train_schedule,
+    "get_travel_route": get_travel_route,
 }
 
 TOOL_META = {
@@ -144,6 +188,11 @@ TOOL_META = {
         "source": "TDX 台鐵時刻表",
         "provider": "交通部 TDX",
     },
+    "get_travel_route": {
+        "label": "規劃路線",
+        "source": "OSRM 路線估算",
+        "provider": "OpenStreetMap",
+    },
 }
 
 
@@ -163,6 +212,21 @@ def summarize_tool_result(name: str, result) -> dict:
                 "count": len(periods),
                 "summary": f"取得 {location} 未來 {len(periods)} 段預報",
                 "preview": preview,
+            }
+        if name == "get_travel_route":
+            origin = result.get("origin", {})
+            dest = result.get("destination", {})
+            origin_label = origin.get("query") or origin.get("name", "")[:40]
+            dest_label = dest.get("query") or dest.get("name", "")[:40]
+            return {
+                "ok": True,
+                "count": 1,
+                "summary": (
+                    f"{result.get('mode_label', '路線')} 約 "
+                    f"{result.get('duration_minutes')} 分鐘（"
+                    f"{result.get('distance_km')} 公里）"
+                ),
+                "preview": [f"{origin_label} → {dest_label}"],
             }
 
     if isinstance(result, list):
@@ -191,6 +255,30 @@ def summarize_tool_result(name: str, result) -> dict:
         }
 
     return {"ok": True, "count": 0, "summary": "查詢完成", "preview": []}
+
+
+MAP_TOOL_NAMES = {"search_attractions", "search_restaurants"}
+
+
+def extract_map_places(name: str, result) -> list:
+    if name not in MAP_TOOL_NAMES or not isinstance(result, list):
+        return []
+
+    places = []
+    for item in result:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        lat, lng = item.get("lat"), item.get("lng")
+        if lat is None or lng is None:
+            continue
+        places.append({
+            "name": item.get("name", ""),
+            "lat": lat,
+            "lng": lng,
+            "address": item.get("address", ""),
+            "type": "attraction" if name == "search_attractions" else "restaurant",
+        })
+    return places
 
 
 def execute_tool(name: str, tool_input: dict):
@@ -323,6 +411,7 @@ def stream_agent(user_message: str, messages: list) -> Generator[dict, None, Non
                     "source": meta.get("source", ""),
                     "provider": meta.get("provider", ""),
                     "result": result_content,
+                    "places": extract_map_places(block.name, result),
                     **summary,
                 },
             }
