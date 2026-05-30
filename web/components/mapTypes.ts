@@ -50,6 +50,69 @@ export function mergeMapPlaces(existing: MapPlace[], incoming: MapPlaceInput[]):
   return merged;
 }
 
+function getPlaceMatchKeys(name: string): string[] {
+  const trimmed = name.trim();
+  const keys = new Set<string>();
+  if (trimmed.length >= 2) keys.add(trimmed);
+
+  const withoutParens = trimmed.replace(/[（(][^）)]*[）)]/g, "").trim();
+  if (withoutParens.length >= 2) keys.add(withoutParens);
+
+  const parenMatch = trimmed.match(/[（(]([^）)]+)[）)]/);
+  if (parenMatch && parenMatch[1].trim().length >= 2) {
+    keys.add(parenMatch[1].trim());
+  }
+
+  return [...keys];
+}
+
+export function getMatchingKeyInContent(placeName: string, content: string): string | null {
+  if (!content.trim()) return null;
+  const keys = getPlaceMatchKeys(placeName).sort((a, b) => b.length - a.length);
+  for (const key of keys) {
+    if (content.includes(key)) return key;
+  }
+
+  const core = placeName.replace(/[（(][^）)]*[）)]/g, "").trim();
+  for (let len = core.length; len >= 3; len--) {
+    for (let i = 0; i <= core.length - len; i++) {
+      const slice = core.slice(i, i + len);
+      if (content.includes(slice)) return slice;
+    }
+  }
+
+  return null;
+}
+
+export function resolveDisplayPlaces(content: string, pool: MapPlace[]): MapPlace[] {
+  if (!pool.length) return [];
+  const mentioned = filterPlacesMentionedInText(content, pool);
+  return mentioned.length > 0 ? mentioned : pool;
+}
+
+export function isPlaceMentionedInText(placeName: string, content: string): boolean {
+  return getMatchingKeyInContent(placeName, content) !== null;
+}
+
+function dedupePlacesByLocation(places: MapPlace[]): MapPlace[] {
+  const byLocation = new Map<string, MapPlace>();
+
+  for (const place of places) {
+    const key = `${Number(place.lat).toFixed(4)},${Number(place.lng).toFixed(4)}`;
+    const existing = byLocation.get(key);
+    if (!existing || place.name.length < existing.name.length) {
+      byLocation.set(key, place);
+    }
+  }
+
+  return [...byLocation.values()];
+}
+
+export function filterPlacesMentionedInText(content: string, places: MapPlace[]): MapPlace[] {
+  const mentioned = places.filter((place) => isPlaceMentionedInText(place.name, content));
+  return dedupePlacesByLocation(mentioned);
+}
+
 export function resolvePlaceByLink(
   linkId: string,
   label: string,

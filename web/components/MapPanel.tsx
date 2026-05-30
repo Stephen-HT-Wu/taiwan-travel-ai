@@ -163,7 +163,7 @@ export default function MapPanel({
           餐廳
         </span>
         {places.length > 0 && (
-          <span className={styles.legendHint}>點選標記或內文地名可互相對應</span>
+          <span className={styles.legendHint}>點地圖標記開啟 Google Maps · 點內文地名對應地圖</span>
         )}
       </div>
 

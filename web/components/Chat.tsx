@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useRef, useEffect, FormEvent, KeyboardEvent } from "react";
+import { useState, useRef, useEffect, useMemo, FormEvent, KeyboardEvent } from "react";
 import dynamic from "next/dynamic";
 import styles from "./Chat.module.css";
 import MarkdownContent from "./MarkdownContent";
 import type { MapFocusTarget, MapPlace, MapPlaceInput } from "./mapTypes";
-import { mergeMapPlaces } from "./mapTypes";
+import { filterPlacesMentionedInText, mergeMapPlaces, resolveDisplayPlaces } from "./mapTypes";
+import { getOrCreateSessionId } from "../lib/sessionId";
+import { openGoogleMaps } from "../lib/googleMaps";
 
 const MapPanel = dynamic(() => import("./MapPanel"), { ssr: false });
 
@@ -53,17 +55,39 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
   const [phase, setPhase] = useState<Phase | null>(null);
+  const [phaseProgress, setPhaseProgress] = useState(-1);
   const [phaseMessage, setPhaseMessage] = useState("");
   const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [streamingText, setStreamingText] = useState("");
-  const [mapPlaces, setMapPlaces] = useState<MapPlace[]>([]);
+  const [streamingPlacePool, setStreamingPlacePool] = useState<MapPlace[]>([]);
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const [mapFocus, setMapFocus] = useState<MapFocusTarget | null>(null);
-  const [streamingPlaces, setStreamingPlaces] = useState<MapPlace[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const composingRef = useRef(false);
   const enterToConfirmImeRef = useRef(false);
   const activityCounter = useRef(0);
+  const sessionIdRef = useRef<string>();
+
+  if (!sessionIdRef.current) {
+    sessionIdRef.current = getOrCreateSessionId();
+  }
+
+  const streamingVisiblePlaces = useMemo(
+    () => filterPlacesMentionedInText(streamingText, streamingPlacePool),
+    [streamingText, streamingPlacePool]
+  );
+
+  const mapPlaces = useMemo(() => {
+    const fromMessages = messages.flatMap((msg) =>
+      msg.role === "assistant"
+        ? resolveDisplayPlaces(msg.content, msg.places ?? [])
+        : []
+    );
+    if (loading) {
+      return mergeMapPlaces(fromMessages, streamingVisiblePlaces);
+    }
+    return mergeMapPlaces([], fromMessages);
+  }, [messages, loading, streamingVisiblePlaces]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -81,13 +105,34 @@ export default function Chat() {
     return `${prefix}-${activityCounter.current}`;
   }
 
-  function handlePlaceSelect(place: MapPlace) {
+  function focusPlace(place: MapPlace) {
     setSelectedPlaceId(place.id);
     setMapFocus({
       lat: place.lat,
       lng: place.lng,
       nonce: Date.now(),
     });
+  }
+
+  function handleTextPlaceSelect(place: MapPlace) {
+    focusPlace(place);
+  }
+
+  function handleMapPlaceSelect(place: MapPlace) {
+    focusPlace(place);
+    openGoogleMaps(place);
+  }
+
+  function updatePhase(next: Phase, message?: string) {
+    const order: Phase[] = ["thinking", "tool", "writing", "done"];
+    const nextIdx = order.indexOf(next);
+    setPhase(next);
+    setPhaseProgress((prev) => Math.max(prev, nextIdx));
+    if (message) {
+      setPhaseMessage(message);
+    } else {
+      setPhaseMessage(PHASE_LABELS[next] || "");
+    }
   }
 
   async function sendMessage(text: string) {
@@ -97,10 +142,11 @@ export default function Chat() {
     setInput("");
     setLoading(true);
     setPhase("thinking");
+    setPhaseProgress(0);
     setPhaseMessage("正在理解你的問題...");
     setActivities([]);
     setStreamingText("");
-    setStreamingPlaces([]);
+    setStreamingPlacePool([]);
     setSelectedPlaceId(null);
     setMapFocus(null);
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
@@ -108,12 +154,32 @@ export default function Chat() {
     const currentActivities: ActivityItem[] = [];
     let currentPlaces: MapPlace[] = [];
     let accumulated = "";
+    let committed = false;
+
+    function commitAssistantMessage(content: string, places: MapPlace[]) {
+      if (committed) return;
+      const hasToolActivity = currentActivities.some((item) => item.type === "tool");
+      if (!content && places.length === 0 && !hasToolActivity) return;
+      committed = true;
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content,
+          activities: [...currentActivities],
+          places: [...places],
+        },
+      ]);
+    }
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: userMessage, session_id: "web" }),
+        body: JSON.stringify({
+          message: userMessage,
+          session_id: sessionIdRef.current,
+        }),
       });
 
       if (!res.ok || !res.body) {
@@ -148,8 +214,7 @@ export default function Chat() {
           const parsed = JSON.parse(data);
 
           if (event === "status") {
-            setPhase(parsed.phase);
-            setPhaseMessage(parsed.message || PHASE_LABELS[parsed.phase as Phase] || "");
+            updatePhase(parsed.phase as Phase, parsed.message);
 
             const statusItem: ActivityItem = {
               id: nextActivityId("status"),
@@ -160,9 +225,11 @@ export default function Chat() {
             currentActivities.push(statusItem);
             setActivities([...currentActivities]);
           } else if (event === "text_delta") {
+            updatePhase("writing", "正在整理回答...");
             accumulated += parsed.text;
             setStreamingText(accumulated);
           } else if (event === "tool_start") {
+            updatePhase("tool", "正在查詢政府開放資料...");
             const toolItem: ActivityItem = {
               id: parsed.id || nextActivityId("tool"),
               type: "tool",
@@ -191,49 +258,38 @@ export default function Chat() {
             }
             if (parsed.places?.length) {
               currentPlaces = mergeMapPlaces(currentPlaces, parsed.places as MapPlaceInput[]);
-              setStreamingPlaces([...currentPlaces]);
-              setMapPlaces((prev) => mergeMapPlaces(prev, parsed.places as MapPlaceInput[]));
+              setStreamingPlacePool([...currentPlaces]);
             }
           } else if (event === "done") {
-            if (accumulated) {
-              setMessages((prev) => [
-                ...prev,
-                {
-                  role: "assistant",
-                  content: accumulated,
-                  activities: [...currentActivities],
-                  places: [...currentPlaces],
-                },
-              ]);
-            }
+            commitAssistantMessage(accumulated, currentPlaces);
             setStreamingText("");
-            setStreamingPlaces([]);
+            setStreamingPlacePool([]);
             setPhase(null);
+            setPhaseProgress(-1);
+            setPhaseMessage("");
+            setActivities([]);
+          } else if (event === "error") {
+            const errorText = parsed.message
+              ? `發生錯誤：${parsed.message}`
+              : "發生錯誤，請稍後再試。";
+            commitAssistantMessage(accumulated || errorText, currentPlaces);
+            setStreamingText("");
+            setStreamingPlacePool([]);
+            setPhase(null);
+            setPhaseProgress(-1);
             setPhaseMessage("");
             setActivities([]);
           }
         }
       }
 
-      // 串流結束但沒收到 done 時，仍保留已串流的文字
-      if (accumulated) {
-        setMessages((prev) => {
-          const last = prev[prev.length - 1];
-          if (last?.role === "assistant" && last.content === accumulated) return prev;
-          return [
-            ...prev,
-            {
-              role: "assistant",
-              content: accumulated,
-              activities: [...currentActivities],
-              places: [...currentPlaces],
-            },
-          ];
-        });
+      if (!committed && (accumulated || currentActivities.length > 0)) {
+        commitAssistantMessage(accumulated, currentPlaces);
       }
       setStreamingText("");
-      setStreamingPlaces([]);
+      setStreamingPlacePool([]);
       setPhase(null);
+      setPhaseProgress(-1);
       setPhaseMessage("");
       setActivities([]);
     } catch (err) {
@@ -247,6 +303,7 @@ export default function Chat() {
       setStreamingText("");
       setActivities([]);
       setPhase(null);
+      setPhaseProgress(-1);
       setPhaseMessage("");
     } finally {
       setLoading(false);
@@ -306,10 +363,10 @@ export default function Chat() {
                 {msg.role === "assistant" ? (
                   <MarkdownContent
                     content={msg.content}
-                    places={msg.places ?? []}
+                    places={resolveDisplayPlaces(msg.content, msg.places ?? [])}
                     mapPlaces={mapPlaces}
                     selectedPlaceId={selectedPlaceId}
-                    onPlaceSelect={handlePlaceSelect}
+                    onPlaceSelect={handleTextPlaceSelect}
                   />
                 ) : (
                   msg.content
@@ -336,7 +393,7 @@ export default function Chat() {
                   className={`${styles.phaseStep} ${
                     phase === step
                       ? styles.phaseActive
-                      : isPhaseDone(step, phase)
+                      : isPhaseDone(step, phaseProgress)
                         ? styles.phaseDone
                         : ""
                   }`}
@@ -355,10 +412,10 @@ export default function Chat() {
             <div className={styles.bubble}>
               <MarkdownContent
                 content={streamingText}
-                places={streamingPlaces}
+                places={streamingVisiblePlaces}
                 mapPlaces={mapPlaces}
                 selectedPlaceId={selectedPlaceId}
-                onPlaceSelect={handlePlaceSelect}
+                onPlaceSelect={handleTextPlaceSelect}
               />
               <span className={styles.cursor}>▊</span>
             </div>
@@ -402,7 +459,7 @@ export default function Chat() {
           places={mapPlaces}
           selectedPlaceId={selectedPlaceId}
           focusTarget={mapFocus}
-          onPlaceSelect={handlePlaceSelect}
+          onPlaceSelect={handleMapPlaceSelect}
         />
       </aside>
     </div>
@@ -467,9 +524,8 @@ function ActivityPanel({
   );
 }
 
-function isPhaseDone(step: Phase, current: Phase | null) {
+function isPhaseDone(step: Phase, progress: number) {
   const order: Phase[] = ["thinking", "tool", "writing", "done"];
   const stepIdx = order.indexOf(step);
-  const currentIdx = current ? order.indexOf(current) : -1;
-  return currentIdx > stepIdx;
+  return progress > stepIdx;
 }

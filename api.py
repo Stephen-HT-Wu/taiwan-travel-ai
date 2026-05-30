@@ -11,7 +11,7 @@ from agent import stream_agent
 
 load_dotenv(override=True)
 
-# 每個 session 保留對話歷史（demo 用途）
+# 每個 session_id 保留對話歷史（記憶體，demo 用途；前端應為每位使用者提供唯一 id）
 sessions: dict[str, list] = {}
 
 
@@ -48,10 +48,22 @@ async def chat(req: ChatRequest):
     messages = sessions[req.session_id]
 
     def generate():
-        for item in stream_agent(req.message, messages):
-            yield format_sse(item["event"], item["data"])
+        try:
+            for item in stream_agent(req.message, messages):
+                yield format_sse(item["event"], item["data"])
+        except Exception as exc:
+            yield format_sse("error", {"message": str(exc)})
+            yield format_sse("done", {})
 
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/health")

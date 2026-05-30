@@ -19,8 +19,7 @@ export default function MarkdownContent({
   selectedPlaceId = null,
   onPlaceSelect,
 }: MarkdownContentProps) {
-  const hasPlaces = places.length > 0 || mapPlaces.length > 0;
-  const markdown = hasPlaces ? linkPlaceNames(content, places, mapPlaces) : content;
+  const markdown = places.length > 0 ? linkPlaceNames(content, places) : content;
 
   return (
     <div className={styles.markdown}>

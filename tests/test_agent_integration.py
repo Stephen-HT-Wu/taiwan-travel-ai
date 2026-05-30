@@ -1,6 +1,3 @@
-from types import SimpleNamespace
-from unittest.mock import MagicMock
-
 from agent import (
     compact_tool_result_for_model,
     execute_tool,
@@ -8,7 +5,9 @@ from agent import (
     stream_agent,
     summarize_tool_result,
 )
-from tests.conftest import FakeAnthropicStream, tdx_get_handler
+from providers.base import TextBlock, ToolUseBlock, TurnResult
+from tests.conftest import tdx_get_handler
+from tests.fake_provider import make_fake_provider
 
 
 def test_execute_tool_unknown_name():
@@ -140,19 +139,36 @@ def test_summarize_tool_result_empty_restaurants():
     assert "餐飲資料庫查無結果" in summary["summary"]
 
 
-def test_stream_agent_end_turn_emits_sse_events(monkeypatch):
-    text_block = SimpleNamespace(type="text", text="台南很好玩")
-    final_message = SimpleNamespace(
-        stop_reason="end_turn",
-        content=[text_block],
+def test_extract_map_places_from_search_places():
+    places = extract_map_places(
+        "search_places",
+        [{"name": "赤崁樓", "lat": 22.997, "lng": 120.202, "type": "attraction"}],
     )
 
-    delta = SimpleNamespace(type="text_delta", text="台南")
-    stream_event = SimpleNamespace(type="content_block_delta", delta=delta)
+    assert len(places) == 1
+    assert places[0]["type"] == "attraction"
 
-    messages_mock = MagicMock()
-    messages_mock.stream.return_value = FakeAnthropicStream([stream_event], final_message)
-    monkeypatch.setattr("agent.client.messages", messages_mock)
+
+def test_compact_tool_result_for_model_empty_search_places():
+    compact = compact_tool_result_for_model("search_places", [])
+
+    assert compact["count"] == 0
+    assert "OpenStreetMap" in compact["note"]
+
+
+def test_stream_agent_end_turn_emits_sse_events(monkeypatch):
+    monkeypatch.setattr(
+        "agent.get_llm_provider",
+        lambda: make_fake_provider([
+            {
+                "events": [{"event": "text_delta", "text": "台南"}],
+                "result": TurnResult(
+                    stop_reason="end_turn",
+                    content=[TextBlock(type="text", text="台南很好玩")],
+                ),
+            }
+        ]),
+    )
 
     events = list(stream_agent("台南有什麼景點？", []))
 
@@ -171,27 +187,29 @@ def test_stream_agent_tool_use_emits_tool_events(monkeypatch, mock_httpx):
         )
     )
 
-    tool_block = SimpleNamespace(
+    tool_block = ToolUseBlock(
         type="tool_use",
         id="toolu_123",
         name="search_attractions",
         input={"city": "Tainan", "limit": 1},
     )
-    text_block = SimpleNamespace(type="text", text="推薦赤崁樓")
-    tool_response = SimpleNamespace(stop_reason="tool_use", content=[tool_block])
-    final_response = SimpleNamespace(stop_reason="end_turn", content=[text_block])
 
-    call_count = {"n": 0}
-
-    def make_stream(*args, **kwargs):
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            return FakeAnthropicStream([], tool_response)
-        return FakeAnthropicStream([], final_response)
-
-    messages_mock = MagicMock()
-    messages_mock.stream.side_effect = make_stream
-    monkeypatch.setattr("agent.client.messages", messages_mock)
+    monkeypatch.setattr(
+        "agent.get_llm_provider",
+        lambda: make_fake_provider([
+            {
+                "events": [{"event": "tool_use_start"}],
+                "result": TurnResult(stop_reason="tool_use", content=[tool_block]),
+            },
+            {
+                "events": [],
+                "result": TurnResult(
+                    stop_reason="end_turn",
+                    content=[TextBlock(type="text", text="推薦赤崁樓")],
+                ),
+            },
+        ]),
+    )
 
     events = list(stream_agent("台南景點", []))
 
@@ -202,3 +220,66 @@ def test_stream_agent_tool_use_emits_tool_events(monkeypatch, mock_httpx):
     assert "赤崁樓" in tool_end["data"]["preview"]
     assert len(tool_end["data"]["places"]) == 1
     assert tool_end["data"]["places"][0]["lat"] == 22.997
+
+
+def test_run_tool_calls_uses_anthropic_tool_result_shape():
+    from providers.base import ToolUseBlock
+    from agent import run_tool_calls
+
+    tool_results, _full_results = run_tool_calls([
+        ToolUseBlock(
+            type="tool_use",
+            id="toolu_123",
+            name="search_places",
+            input={"city": "Tainan", "limit": 1},
+        )
+    ])
+
+    assert len(tool_results) == 1
+    assert set(tool_results[0].keys()) == {"type", "tool_use_id", "content"}
+    assert tool_results[0]["type"] == "tool_result"
+
+
+def test_stream_agent_stores_serializable_assistant_messages(monkeypatch, mock_httpx):
+    mock_httpx["get_handlers"].append(
+        tdx_get_handler(
+            "/v2/Tourism/ScenicSpot/Tainan",
+            [{"ScenicSpotName": "赤崁樓", "Picture": {}, "Position": {"PositionLat": 22.997, "PositionLon": 120.202}}],
+        )
+    )
+
+    tool_block = ToolUseBlock(
+        type="tool_use",
+        id="toolu_123",
+        name="search_attractions",
+        input={"city": "Tainan", "limit": 1},
+    )
+
+    monkeypatch.setattr(
+        "agent.get_llm_provider",
+        lambda: make_fake_provider([
+            {
+                "events": [{"event": "tool_use_start"}],
+                "result": TurnResult(stop_reason="tool_use", content=[tool_block]),
+            },
+            {
+                "events": [{"event": "text_delta", "text": "推薦"}],
+                "result": TurnResult(
+                    stop_reason="end_turn",
+                    content=[TextBlock(type="text", text="推薦赤崁樓")],
+                ),
+            },
+        ]),
+    )
+
+    messages = []
+    list(stream_agent("台南景點", messages))
+
+    assistant_messages = [msg for msg in messages if msg["role"] == "assistant"]
+    assert len(assistant_messages) == 2
+    for msg in assistant_messages:
+        for block in msg["content"]:
+            assert isinstance(block, dict)
+            assert block["type"] in {"text", "tool_use"}
+    assert assistant_messages[0]["content"][0]["type"] == "tool_use"
+    assert assistant_messages[1]["content"][0]["type"] == "text"

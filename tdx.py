@@ -95,7 +95,7 @@ def get_station_ids() -> Dict[str, str]:
     return mapping
 
 
-def search_attractions(city: str, keyword: str = "", limit: int = 5) -> List[dict]:
+def search_attractions(city: str, keyword: str = "", limit: int = 20) -> List[dict]:
     params = {
         "$top": limit,
         "$select": "ScenicSpotName,DescriptionDetail,Address,OpenTime,Picture,Class1,Position",
@@ -121,7 +121,7 @@ def search_attractions(city: str, keyword: str = "", limit: int = 5) -> List[dic
     ]
 
 
-def search_restaurants(city: str, keyword: str = "", limit: int = 5) -> List[dict]:
+def search_restaurants(city: str, keyword: str = "", limit: int = 20) -> List[dict]:
     params = {
         "$top": limit,
         "$select": "RestaurantName,Description,Address,OpenTime,Phone,City,Position",

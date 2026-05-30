@@ -1,38 +1,50 @@
 import type { MapPlace } from "./mapTypes";
+import { filterPlacesMentionedInText, getMatchingKeyInContent } from "./mapTypes";
 
 function isInsideMarkdownLink(content: string, index: number): boolean {
-  const before = content.slice(0, index);
-  const openLink = before.lastIndexOf("[");
-  const closeLink = before.lastIndexOf("]");
-  const openDest = before.lastIndexOf("](");
+  let pos = 0;
+  while (pos < content.length) {
+    const start = content.indexOf("[", pos);
+    if (start === -1) break;
 
-  if (openDest === -1) return false;
-  if (closeLink < openDest) return false;
-  if (openLink === -1 || openLink > closeLink) return false;
+    const textEnd = content.indexOf("]", start + 1);
+    if (textEnd === -1) break;
 
-  const after = content.slice(index);
-  return after.includes(")");
+    if (textEnd + 1 >= content.length || content[textEnd + 1] !== "(") {
+      pos = start + 1;
+      continue;
+    }
+
+    const urlEnd = content.indexOf(")", textEnd + 2);
+    if (urlEnd === -1) {
+      return index >= start;
+    }
+
+    if (index >= start && index <= urlEnd) {
+      return true;
+    }
+
+    pos = urlEnd + 1;
+  }
+
+  return false;
 }
 
-export function linkPlaceNames(
-  content: string,
-  messagePlaces: MapPlace[],
-  mapPlaces: MapPlace[] = []
-): string {
-  const linkSources = mapPlaces.length > 0 ? mapPlaces : messagePlaces;
+export function linkPlaceNames(content: string, places: MapPlace[]): string {
+  const linkSources = filterPlacesMentionedInText(content, places);
   if (!linkSources.length) return content;
 
   let linked = content;
   const sorted = [...linkSources].sort((a, b) => b.name.length - a.name.length);
 
   for (const place of sorted) {
-    const name = place.name.trim();
-    if (name.length < 2) continue;
+    const matchKey = getMatchingKeyInContent(place.name, content);
+    if (!matchKey || matchKey.length < 2) continue;
 
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escaped = matchKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     linked = linked.replace(new RegExp(escaped, "g"), (match, offset, string) => {
       if (isInsideMarkdownLink(string, offset)) return match;
-      return `[${name}](#map-${encodeURIComponent(place.id)})`;
+      return `[${match}](#map-${encodeURIComponent(place.id)})`;
     });
   }
 

@@ -3,21 +3,46 @@ import os
 from typing import Generator
 
 from dotenv import load_dotenv
-import anthropic
 
 from tdx import search_attractions, search_restaurants, search_bus_routes, search_train_schedule
 from cwa import get_weather_forecast
 from routing import get_travel_route
+from osm_places import search_places
+from providers import get_llm_provider
+from providers.base import content_blocks_to_api, sanitize_messages
 
 load_dotenv(override=True)
 
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-MODEL = "claude-sonnet-4-5"
+COMPACT_LIST_LIMIT = 15
 
 tools = [
     {
+        "name": "search_places",
+        "description": (
+            "搜尋台灣縣市的景點、古蹟、美食（OpenStreetMap）。"
+            "使用者詢問景點推薦、美食、行程規劃時，優先使用此工具。"
+            "可搭配 keyword 查特定地名（例如 赤崁樓）。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "city": {
+                    "type": "string",
+                    "description": "縣市英文名，例如 Tainan、Taipei、Taichung、Kaohsiung",
+                },
+                "keyword": {"type": "string", "description": "地點名稱關鍵字（可選）"},
+                "place_type": {
+                    "type": "string",
+                    "description": "all（預設）、attraction（景點/古蹟）、restaurant（餐飲）",
+                },
+                "limit": {"type": "integer", "description": "回傳幾筆資料，預設 20"},
+            },
+            "required": ["city"],
+        },
+    },
+    {
         "name": "search_attractions",
-        "description": "搜尋台灣各縣市的觀光景點",
+        "description": "查詢觀光署 TDX 登錄的觀光景點（覆蓋率有限，建議搭配 search_places）",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -26,14 +51,14 @@ tools = [
                     "description": "縣市英文名，例如 Tainan、Taipei、Taichung、HualienCounty",
                 },
                 "keyword": {"type": "string", "description": "景點名稱關鍵字（可選）"},
-                "limit": {"type": "integer", "description": "回傳幾筆資料，預設 5"},
+                "limit": {"type": "integer", "description": "回傳幾筆資料，預設 20"},
             },
             "required": ["city"],
         },
     },
     {
         "name": "search_restaurants",
-        "description": "搜尋台灣各縣市的餐廳、小吃",
+        "description": "查詢觀光署 TDX 登錄的餐飲（覆蓋率有限，建議搭配 search_places）",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -42,7 +67,7 @@ tools = [
                     "description": "縣市英文名，例如 Tainan、Taipei、Taichung",
                 },
                 "keyword": {"type": "string", "description": "餐廳名稱或料理關鍵字（可選）"},
-                "limit": {"type": "integer", "description": "回傳幾筆資料，預設 5"},
+                "limit": {"type": "integer", "description": "回傳幾筆資料，預設 20"},
             },
             "required": ["city"],
         },
@@ -146,6 +171,12 @@ SYSTEM_PROMPT = """你是一個台灣旅遊規劃助理。
 當使用者詢問景點、美食、天氣或交通時，使用對應工具查詢真實資料，再根據資料給出建議。
 規劃行程時，可綜合天氣、景點、餐廳與交通資訊。
 
+資料源優先序：
+- 景點、古蹟、美食推薦：優先使用 search_places（OpenStreetMap），結果可作為已查證推薦並顯示於地圖。
+- 觀光署登錄資料：可補充 search_attractions / search_restaurants（TDX），但須標示「觀光署登錄，可能不全」，不可暗示這是完整列表。
+- 兩種來源都有資料時，回答分區塊（OpenStreetMap 查詢結果／觀光署登錄），不要混為一談。
+- 天氣、台鐵、公車、路線時間：必須使用對應工具，不可憑記憶。
+
 有一說一（建立信任的核心原則）：
 - 回答中每一項資訊都要能對應來源：工具查到的、或你明確標示為「一般參考／非即時查詢」的。
 - 工具回傳的店名、景點、地址、營業時間、天氣、班次、路線時間與距離，才可當作「已查證」內容直接引用。
@@ -153,6 +184,7 @@ SYSTEM_PROMPT = """你是一個台灣旅遊規劃助理。
 - 查無工具資料時，仍可提供一般性方向（例如「可留意中山站周邊的南京西路、赤峰街一帶」），但須加註「以下為一般性參考，非即時查詢結果，建議出發前自行確認」。
 - 未經工具查證的內容，禁止寫具體數字或看似精確的描述，包括：步行／開車分鐘數、公里數、捷運出口編號、步行幾分鐘可達、營業時間、電話、評分、是否必吃。
 - 不可把訓練資料中的店名、餐廳名稱當作「剛才查到的」推薦；只有出現在工具回傳 items 裡的名稱，才能列為已查證推薦。
+- 推薦景點或餐廳時，請使用工具回傳的 name 原文（或其中較短的常用簡稱），以便系統將內文與地圖標記對應。
 - 若先前已用未查證資訊回答，使用者指出錯誤或工具查詢失敗時，應直接承認並修正，不要為先前推薦找理由。
 
 交通時間與距離規則：
@@ -185,6 +217,7 @@ SYSTEM_PROMPT = """你是一個台灣旅遊規劃助理。
 回答時用繁體中文，口吻親切自然。"""
 
 TOOL_HANDLERS = {
+    "search_places": search_places,
     "search_attractions": search_attractions,
     "search_restaurants": search_restaurants,
     "get_weather_forecast": get_weather_forecast,
@@ -194,13 +227,18 @@ TOOL_HANDLERS = {
 }
 
 TOOL_META = {
+    "search_places": {
+        "label": "查詢地點",
+        "source": "OpenStreetMap POI",
+        "provider": "OpenStreetMap",
+    },
     "search_attractions": {
-        "label": "查詢景點",
+        "label": "觀光署登錄景點",
         "source": "TDX 觀光景點",
         "provider": "交通部 TDX",
     },
     "search_restaurants": {
-        "label": "查詢餐廳",
+        "label": "觀光署登錄餐飲",
         "source": "TDX 觀光餐飲",
         "provider": "交通部 TDX",
     },
@@ -228,6 +266,10 @@ TOOL_META = {
 
 
 EMPTY_TOOL_NOTES = {
+    "search_places": (
+        "OpenStreetMap 查無符合條件的地點。"
+        "不可將未出現在本回傳中的地點當作已查證推薦，也不可為其填寫時間或距離。"
+    ),
     "search_attractions": (
         "觀光署景點資料庫查無結果。"
         "不可將未出現在本回傳中的景點當作已查證推薦，也不可為其填寫時間或距離。"
@@ -360,14 +402,24 @@ def compact_tool_result_for_model(name: str, result):
             }
 
         compact_items = []
-        for item in result[:8]:
+        for item in result[:COMPACT_LIST_LIMIT]:
             if not isinstance(item, dict):
                 compact_items.append(item)
                 continue
             if item.get("error"):
                 compact_items.append({"error": item["error"]})
                 continue
-            if name == "search_attractions":
+            if name == "search_places":
+                compact_items.append({
+                    "name": item.get("name"),
+                    "address": item.get("address"),
+                    "type": item.get("type"),
+                    "category": item.get("category"),
+                    "lat": item.get("lat"),
+                    "lng": item.get("lng"),
+                    "source": item.get("source"),
+                })
+            elif name == "search_attractions":
                 compact_items.append({
                     "name": item.get("name"),
                     "address": item.get("address"),
@@ -411,7 +463,7 @@ def compact_tool_result_for_model(name: str, result):
     return result
 
 
-MAP_TOOL_NAMES = {"search_attractions", "search_restaurants"}
+MAP_TOOL_NAMES = {"search_places", "search_attractions", "search_restaurants"}
 
 
 def extract_map_places(name: str, result) -> list:
@@ -425,12 +477,20 @@ def extract_map_places(name: str, result) -> list:
         lat, lng = item.get("lat"), item.get("lng")
         if lat is None or lng is None:
             continue
+        place_type = item.get("type")
+        if not place_type:
+            if name == "search_attractions":
+                place_type = "attraction"
+            elif name == "search_restaurants":
+                place_type = "restaurant"
+            else:
+                place_type = "attraction"
         places.append({
             "name": item.get("name", ""),
             "lat": lat,
             "lng": lng,
             "address": item.get("address", ""),
-            "type": "attraction" if name == "search_attractions" else "restaurant",
+            "type": place_type,
         })
     return places
 
@@ -466,75 +526,103 @@ def run_tool_calls(content_blocks) -> tuple[list[dict], dict[str, object]]:
 
 def run_agent(user_message: str, messages: list):
     """CLI 版 agent（非串流）"""
+    provider = get_llm_provider()
     print("-" * 40)
     messages.append({"role": "user", "content": user_message})
 
     while True:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=2048,
+        turn = provider.create_turn(
             system=SYSTEM_PROMPT,
             tools=tools,
             messages=messages,
+            max_tokens=2048,
         )
 
-        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "assistant", "content": content_blocks_to_api(turn.content)})
 
-        if response.stop_reason == "end_turn":
-            for block in response.content:
-                if hasattr(block, "text"):
+        if turn.stop_reason == "end_turn":
+            for block in turn.content:
+                if block.type == "text":
                     print(block.text)
             break
 
-        for block in response.content:
+        for block in turn.content:
             if block.type == "tool_use":
                 print(f"[呼叫工具] {block.name}({block.input})")
 
-        tool_results, _full_results = run_tool_calls(response.content)
+        tool_results, _full_results = run_tool_calls(turn.content)
         messages.append({"role": "user", "content": tool_results})
+
+
+def _last_message_is_tool_results(messages: list) -> bool:
+    if not messages:
+        return False
+    content = messages[-1].get("content")
+    if not isinstance(content, list):
+        return False
+    return any(item.get("type") == "tool_result" for item in content if isinstance(item, dict))
 
 
 def stream_agent(user_message: str, messages: list) -> Generator[dict, None, None]:
     """串流版 agent，yield SSE 事件 dict"""
+    provider = get_llm_provider()
+    sanitize_messages(messages)
+
     messages.append({"role": "user", "content": user_message})
 
     while True:
-        yield {
-            "event": "status",
-            "data": {"phase": "thinking", "message": "正在理解你的問題..."},
-        }
+        if _last_message_is_tool_results(messages):
+            yield {
+                "event": "status",
+                "data": {"phase": "writing", "message": "正在生成回答..."},
+            }
+        else:
+            yield {
+                "event": "status",
+                "data": {"phase": "thinking", "message": "正在理解你的問題..."},
+            }
 
         writing_started = False
-        with client.messages.stream(
-            model=MODEL,
-            max_tokens=2048,
+        tool_phase_started = False
+        stream = provider.stream_turn(
             system=SYSTEM_PROMPT,
             tools=tools,
             messages=messages,
-        ) as stream:
-            for event in stream:
-                if event.type == "content_block_delta" and event.delta.type == "text_delta":
+            max_tokens=2048,
+        )
+        turn = None
+        try:
+            while True:
+                event = next(stream)
+                if event.get("event") == "tool_use_start" and not tool_phase_started:
+                    tool_phase_started = True
+                    yield {
+                        "event": "status",
+                        "data": {"phase": "tool", "message": "正在查詢資料..."},
+                    }
+                elif event.get("event") == "text_delta":
                     if not writing_started:
                         writing_started = True
                         yield {
                             "event": "status",
                             "data": {"phase": "writing", "message": "正在整理回答..."},
                         }
-                    yield {"event": "text_delta", "data": {"text": event.delta.text}}
-            response = stream.get_final_message()
+                    yield {"event": "text_delta", "data": {"text": event["text"]}}
+        except StopIteration as stop:
+            turn = stop.value
 
-        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "assistant", "content": content_blocks_to_api(turn.content)})
 
-        if response.stop_reason == "end_turn":
+        if turn.stop_reason == "end_turn":
             yield {"event": "status", "data": {"phase": "done", "message": "完成"}}
             yield {"event": "done", "data": {}}
             break
 
-        tool_blocks = [block for block in response.content if block.type == "tool_use"]
-        if tool_blocks:
+        tool_blocks = [block for block in turn.content if block.type == "tool_use"]
+        if tool_blocks and not tool_phase_started:
             yield {
                 "event": "status",
-                "data": {"phase": "tool", "message": "正在查詢政府開放資料..."},
+                "data": {"phase": "tool", "message": "正在查詢資料..."},
             }
 
         for block in tool_blocks:
@@ -551,7 +639,7 @@ def stream_agent(user_message: str, messages: list) -> Generator[dict, None, Non
                 },
             }
 
-        tool_results, full_results = run_tool_calls(response.content)
+        tool_results, full_results = run_tool_calls(turn.content)
 
         for block in tool_blocks:
             result = full_results.get(block.id, {})

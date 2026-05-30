@@ -41,6 +41,8 @@ def mock_httpx(monkeypatch):
     monkeypatch.setattr("tdx.httpx.get", mock_get)
     monkeypatch.setattr("cwa.httpx.get", mock_get)
     monkeypatch.setattr("routing.httpx.get", mock_get)
+    monkeypatch.setattr("osm_places.httpx.get", mock_get)
+    monkeypatch.setattr("osm_places.httpx.post", mock_post)
     return state
 
 
