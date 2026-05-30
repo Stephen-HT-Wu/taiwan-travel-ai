@@ -21,8 +21,11 @@ tools = [
         "name": "search_places",
         "description": (
             "搜尋台灣縣市的景點、古蹟、美食（OpenStreetMap）。"
-            "使用者詢問景點推薦、美食、行程規劃時，優先使用此工具。"
-            "可搭配 keyword 查特定地名（例如 赤崁樓）。"
+            "使用者詢問景點、美食、一日遊/行程規劃時必須使用；"
+            "規劃行程前至少各查一次 place_type=attraction 與 restaurant。"
+            "只有此工具回傳且有座標的地點才會顯示在地圖與內文連結。"
+            "city 例如 Chiayi（嘉義市）、ChiayiCounty（嘉義縣）、Tainan。"
+            "可搭配 keyword 查特定地名。"
         ),
         "input_schema": {
             "type": "object",
@@ -199,6 +202,12 @@ SYSTEM_PROMPT = f"""你是一個台灣旅遊規劃助理。
 今天的日期是 {date.today().isoformat()}。
 當使用者詢問景點、美食、天氣或交通時，使用對應工具查詢真實資料，再根據資料給出建議。
 規劃行程時，可綜合天氣、景點、餐廳與交通資訊。
+
+一日遊／行程規劃流程（必遵守，否則地圖與內文連結無法顯示）：
+1. 先查天氣、台鐵/高鐵等必要交通。
+2. 再至少各呼叫一次 search_places（place_type=attraction 與 restaurant，city 填目的地，如 Chiayi、ChiayiCounty）。
+3. 行程中列出的每個景點、餐廳名稱必須來自 search_places 回傳的 name；未查到的不可寫具體店名當作已查證推薦。
+4. 交通班次可引用 search_train_schedule / search_hsr_schedule；景點餐廳不可憑記憶補名。
 
 資料源優先序：
 - 景點、古蹟、美食推薦：優先使用 search_places（OpenStreetMap），結果可作為已查證推薦並顯示於地圖。
@@ -604,12 +613,31 @@ def _last_message_is_tool_results(messages: list) -> bool:
     return any(item.get("type") == "tool_result" for item in content if isinstance(item, dict))
 
 
+def _should_require_place_tools(user_message: str) -> bool:
+    keywords = (
+        "行程", "一日遊", "半日遊", "兩天", "三天", "幾日",
+        "規劃", "去玩", "觀光", "景點", "美食", "餐廳", "推薦",
+    )
+    return any(keyword in user_message for keyword in keywords)
+
+
+PLACE_TOOLS_NUDGE = (
+    "請先使用 search_places 查詢目的地的景點與餐廳："
+    "至少各呼叫一次 place_type=attraction 與 restaurant（city 如 Chiayi、ChiayiCounty）。"
+    "完成後再撰寫行程；推薦名稱必須來自 search_places 回傳，以便地圖與內文連結顯示。"
+)
+
+
 def stream_agent(user_message: str, messages: list) -> Generator[dict, None, None]:
     """串流版 agent，yield SSE 事件 dict"""
     provider = get_llm_provider()
     sanitize_messages(messages)
 
     messages.append({"role": "user", "content": user_message})
+
+    place_tools_called = False
+    place_tools_post_tool_nudge_sent = False
+    place_tools_end_turn_nudge_sent = False
 
     while True:
         if _last_message_is_tool_results(messages):
@@ -654,12 +682,27 @@ def stream_agent(user_message: str, messages: list) -> Generator[dict, None, Non
 
         messages.append({"role": "assistant", "content": content_blocks_to_api(turn.content)})
 
+        tool_blocks = [block for block in turn.content if block.type == "tool_use"]
+        if tool_blocks:
+            place_tools_called |= any(block.name in MAP_TOOL_NAMES for block in tool_blocks)
+
         if turn.stop_reason == "end_turn":
+            if (
+                _should_require_place_tools(user_message)
+                and not place_tools_called
+                and not place_tools_end_turn_nudge_sent
+            ):
+                place_tools_end_turn_nudge_sent = True
+                messages.append({"role": "user", "content": PLACE_TOOLS_NUDGE})
+                continue
             yield {"event": "status", "data": {"phase": "done", "message": "完成"}}
             yield {"event": "done", "data": {}}
             break
 
-        tool_blocks = [block for block in turn.content if block.type == "tool_use"]
+        if not tool_blocks:
+            yield {"event": "status", "data": {"phase": "done", "message": "完成"}}
+            yield {"event": "done", "data": {}}
+            break
         if tool_blocks and not tool_phase_started:
             yield {
                 "event": "status",
@@ -702,3 +745,11 @@ def stream_agent(user_message: str, messages: list) -> Generator[dict, None, Non
             }
 
         messages.append({"role": "user", "content": tool_results})
+
+        if (
+            _should_require_place_tools(user_message)
+            and not place_tools_called
+            and not place_tools_post_tool_nudge_sent
+        ):
+            place_tools_post_tool_nudge_sent = True
+            messages.append({"role": "user", "content": PLACE_TOOLS_NUDGE})

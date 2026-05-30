@@ -4,6 +4,7 @@ from agent import (
     extract_map_places,
     stream_agent,
     summarize_tool_result,
+    _should_require_place_tools,
 )
 from providers.base import TextBlock, ToolUseBlock, TurnResult
 from tests.conftest import tdx_get_handler
@@ -156,6 +157,75 @@ def test_compact_tool_result_for_model_empty_search_places():
     assert "OpenStreetMap" in compact["note"]
 
 
+def test_should_require_place_tools_for_itinerary_queries():
+    assert _should_require_place_tools(
+        "幫我規劃明天早上8:00後坐高鐵或台鐵從台北到嘉義一日遊行程，考慮到天氣。"
+    )
+    assert not _should_require_place_tools("明天台北會下雨嗎？")
+
+
+def test_stream_agent_nudges_place_tools_after_transport_weather(monkeypatch, mock_httpx):
+    weather_block = ToolUseBlock(
+        type="tool_use",
+        id="toolu_w",
+        name="get_weather_forecast",
+        input={"city": "Chiayi"},
+    )
+    train_block = ToolUseBlock(
+        type="tool_use",
+        id="toolu_t",
+        name="search_train_schedule",
+        input={"origin": "台北", "destination": "嘉義", "travel_date": "2026-05-31"},
+    )
+    places_block = ToolUseBlock(
+        type="tool_use",
+        id="toolu_p",
+        name="search_places",
+        input={"city": "Chiayi", "place_type": "attraction", "limit": 1},
+    )
+
+    monkeypatch.setattr(
+        "agent.get_llm_provider",
+        lambda: make_fake_provider([
+            {
+                "events": [{"event": "tool_use_start"}],
+                "result": TurnResult(stop_reason="tool_use", content=[weather_block, train_block]),
+            },
+            {
+                "events": [{"event": "tool_use_start"}],
+                "result": TurnResult(stop_reason="tool_use", content=[places_block]),
+            },
+            {
+                "events": [{"event": "text_delta", "text": "嘉義"}],
+                "result": TurnResult(
+                    stop_reason="end_turn",
+                    content=[TextBlock(type="text", text="嘉義一日遊")],
+                ),
+            },
+        ]),
+    )
+
+    messages = []
+    query = "幫我規劃嘉義一日遊行程，考慮到天氣。"
+    list(stream_agent(query, messages))
+
+    user_texts = [
+        block if isinstance(block, str) else block
+        for msg in messages
+        if msg["role"] == "user"
+        for block in ([msg["content"]] if isinstance(msg["content"], str) else msg["content"])
+    ]
+    assert any("search_places" in text for text in user_texts if isinstance(text, str))
+    tool_names = [
+        block["name"]
+        for msg in messages
+        if msg["role"] == "assistant"
+        for block in msg["content"]
+        if block.get("type") == "tool_use"
+    ]
+    assert "search_places" in tool_names
+
+
 def test_stream_agent_end_turn_emits_sse_events(monkeypatch):
     monkeypatch.setattr(
         "agent.get_llm_provider",
@@ -170,7 +240,7 @@ def test_stream_agent_end_turn_emits_sse_events(monkeypatch):
         ]),
     )
 
-    events = list(stream_agent("台南有什麼景點？", []))
+    events = list(stream_agent("你好，請簡短回覆。", []))
 
     event_names = [e["event"] for e in events]
     assert "status" in event_names
