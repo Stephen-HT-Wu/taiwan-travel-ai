@@ -237,7 +237,8 @@ tools = [
         "name": "search_nearby_transit_stops",
         "description": (
             "查詢座標附近的大眾運輸站點（公車站牌、捷運站）。"
-            "回答最近捷運/公車站，或 estimate_transit_segment 前可先查。"
+            "使用者問「附近有哪些站、最近的公車站／捷運站」或「從 A 到 B 搭哪些公車」時，"
+            "先對起點（與終點）查附近站牌。"
             "不含搭車時間，僅站點位置與距離。"
         ),
         "input_schema": {
@@ -263,8 +264,10 @@ tools = [
         "name": "estimate_transit_segment",
         "description": (
             "估算兩座標間大眾運輸段時間（TDX 同路線公車直達或捷運 OD + 步行接驳）。"
-            "單段步行超過 15 分鐘、或使用者要求搭公車/捷運時使用。"
-            "feasible 為 false 時不可引用公車/捷運分鐘數，可改列 walking_alternative。"
+            "主要用於回答「大概多久」；若回傳 route_name 也可引用路線名。"
+            "使用者只問「搭哪些公車／哪幾路」時，仍須先 search_nearby_transit_stops，"
+            "再搭配本工具（prefer=bus）或 search_bus_routes（查特定路線編號）。"
+            "feasible 為 false 或 bus_minutes 為 null 時不可引用公車分鐘數。"
             "不支援複雜轉乘。"
         ),
         "input_schema": {
@@ -325,7 +328,8 @@ SYSTEM_PROMPT = f"""你是一個台灣旅遊規劃助理。
 - 規劃行程時優先 get_itinerary_legs 批次計算相鄰地點移動時間；單點 A→B 仍可用 get_travel_route。
 - 使用者問兩地之間「多久、多遠、怎麼走」時，必須呼叫 get_travel_route 或 get_itinerary_legs，不可憑記憶估算分鐘數。
 - get_travel_route / get_itinerary_legs 回傳 error 或 geocode 失敗時，只能說「無法計算路線」，不可補猜時間或距離。
-- estimate_transit_segment 的 feasible 為 false 時，不可引用公車/捷運分鐘數，可改列 walking_alternative 或說明無法估算轉乘。
+- 使用者問「要搭哪些公車、哪幾路、經過哪些站」時：先 search_nearby_transit_stops 查起點與終點附近站牌，再 estimate_transit_segment（prefer=bus）查同路線直達；有 route_name 即可回答路線，bus_minutes 為 null 時只列路線不列公車分鐘數。search_bus_routes 用於查特定路線編號或關鍵字，不是 A→B 搭車的首要工具。
+- estimate_transit_segment 的 feasible 為 false 時，不可引用公車/捷運分鐘數，可改列 walking_alternative 或說明無法估算轉乘；回傳 error 時向使用者說明查詢失敗，勿顯示原始 HTTP 錯誤。
 - 沒有工具資料時，明確告知無法提供精確時間，不要猜測。
 - 回覆時說明交通方式，並提及 OSRM/TDX 估算不含等車或轉乘。
 - 大眾運輸僅在 estimate_transit_segment 或 search_nearby_transit_stops 有資料時才可引用站名；不可與步行時間混淆。

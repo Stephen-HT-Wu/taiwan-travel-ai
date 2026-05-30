@@ -16,7 +16,7 @@ def test_haversine_m():
 def test_search_nearby_transit_stops_filters_by_distance(mock_httpx):
     mock_httpx["get_handlers"].append(
         tdx_get_handler(
-            "/v3/Bus/Stop/City/Chiayi",
+            "/v2/Bus/Stop/City/Chiayi",
             {
                 "Items": [
                     {
@@ -53,7 +53,7 @@ def test_search_nearby_transit_stops_filters_by_distance(mock_httpx):
 def test_estimate_transit_segment_bus_direct(mock_httpx):
     mock_httpx["get_handlers"].append(
         tdx_get_handler(
-            "/v3/Bus/Stop/City/Tainan",
+            "/v2/Bus/Stop/City/Tainan",
             {
                 "Items": [
                     {
@@ -74,7 +74,7 @@ def test_estimate_transit_segment_bus_direct(mock_httpx):
     )
     mock_httpx["get_handlers"].append(
         tdx_get_handler(
-            "/v3/Bus/StopOfRoute/City/Tainan",
+            "/v2/Bus/StopOfRoute/City/Tainan",
             {
                 "Items": [
                     {
@@ -202,7 +202,7 @@ def test_estimate_transit_segment_metro(mock_httpx):
 def test_estimate_transit_segment_no_direct_route(mock_httpx):
     mock_httpx["get_handlers"].append(
         tdx_get_handler(
-            "/v3/Bus/Stop/City/Chiayi",
+            "/v2/Bus/Stop/City/Chiayi",
             {
                 "Items": [
                     {
@@ -223,7 +223,7 @@ def test_estimate_transit_segment_no_direct_route(mock_httpx):
     )
     mock_httpx["get_handlers"].append(
         tdx_get_handler(
-            "/v3/Bus/StopOfRoute/City/Chiayi",
+            "/v2/Bus/StopOfRoute/City/Chiayi",
             {"Items": []},
         )
     )
@@ -246,3 +246,46 @@ def test_estimate_transit_segment_no_direct_route(mock_httpx):
 
     assert result["feasible"] is False
     assert result["walking_alternative"] is not None
+
+
+def test_search_nearby_transit_stops_tdx_error_returns_friendly_message(mock_httpx):
+    def bad_handler(url, kwargs):
+        if "/v2/Bus/Stop/City/Taipei" in url:
+            return json_response(
+                {"Message": "City: 'Taipei' is not accepted but Tainan"},
+                status_code=400,
+            )
+        return None
+
+    mock_httpx["get_handlers"].append(bad_handler)
+
+    results = search_nearby_transit_stops(25.052, 121.520, "Taipei", transit_type="bus")
+
+    assert len(results) == 1
+    assert "error" in results[0]
+    assert "400" in results[0]["error"]
+
+
+def test_estimate_transit_segment_tdx_error_not_exception(mock_httpx):
+    def bad_handler(url, kwargs):
+        if "/v2/Bus/Stop/City/Taipei" in url:
+            return json_response(
+                {"Message": "City: 'Taipei' is not accepted but Tainan"},
+                status_code=400,
+            )
+        return None
+
+    mock_httpx["get_handlers"].append(bad_handler)
+    mock_httpx["get_handlers"].append(osrm_handler(1500, 1200))
+
+    result = estimate_transit_segment(
+        25.052,
+        121.520,
+        25.040,
+        121.510,
+        "Taipei",
+        prefer="bus",
+    )
+
+    assert "error" in result
+    assert "400" in result["error"]

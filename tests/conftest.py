@@ -19,6 +19,7 @@ def reset_tdx_token_cache():
         transit._s2s_travel_time_cache.clear()
         transit._metro_stations_cache.clear()
         transit._metro_od_fare_cache.clear()
+        transit._bus_stops_error_cache.clear()
     except ImportError:
         pass
     yield
@@ -33,6 +34,7 @@ def reset_tdx_token_cache():
         transit._s2s_travel_time_cache.clear()
         transit._metro_stations_cache.clear()
         transit._metro_od_fare_cache.clear()
+        transit._bus_stops_error_cache.clear()
     except ImportError:
         pass
 
@@ -74,11 +76,20 @@ def mock_httpx(monkeypatch):
 
 
 def json_response(payload, status_code=200):
+    import httpx
+
     response = MagicMock()
-    response.raise_for_status = MagicMock()
-    if status_code >= 400:
-        response.raise_for_status.side_effect = Exception(f"HTTP {status_code}")
+    response.status_code = status_code
+    response.text = json.dumps(payload) if isinstance(payload, dict) else str(payload)
     response.json.return_value = payload
+    if status_code >= 400:
+        response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            f"HTTP {status_code}",
+            request=MagicMock(),
+            response=response,
+        )
+    else:
+        response.raise_for_status = MagicMock()
     return response
 
 

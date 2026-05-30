@@ -1,10 +1,16 @@
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
+
+import httpx
 
 from routing import get_travel_route
 from tdx import _localized_name, _tdx_get
 
 EARTH_RADIUS_M = 6371000
+BUS_STOP_PAGE_SIZE = 1000
+BUS_STOP_MAX_PAGES = 15
+STOP_OF_ROUTE_PAGE_SIZE = 500
+STOP_OF_ROUTE_MAX_PAGES = 20
 
 CITY_RAIL_SYSTEMS: Dict[str, List[str]] = {
     "Taipei": ["TRTC", "NTMC"],
@@ -19,6 +25,23 @@ _stop_of_route_cache: Dict[str, List[dict]] = {}
 _s2s_travel_time_cache: Dict[str, List[dict]] = {}
 _metro_stations_cache: Dict[str, List[dict]] = {}
 _metro_od_fare_cache: Dict[str, List[dict]] = {}
+_bus_stops_error_cache: Dict[str, str] = {}
+
+
+def _tdx_get_safe(path: str, params: Optional[dict] = None) -> Union[list, dict]:
+    """Call TDX; return {"error": "..."} instead of raising on HTTP failures."""
+    try:
+        return _tdx_get(path, params)
+    except httpx.HTTPStatusError as exc:
+        detail = ""
+        try:
+            body = exc.response.json()
+            detail = body.get("Message") or body.get("message") or str(body)
+        except Exception:
+            detail = exc.response.text[:200]
+        return {"error": f"TDX 查詢失敗（{exc.response.status_code}）：{detail}"}
+    except httpx.HTTPError as exc:
+        return {"error": f"TDX 連線失敗：{exc}"}
 
 
 def _unwrap_items(data) -> list:
@@ -68,52 +91,95 @@ def _nearest_points(
     return ranked[:limit]
 
 
-def _load_bus_stops(city: str) -> List[dict]:
+def _parse_bus_stop(item: dict) -> Optional[dict]:
+    lat, lng = _parse_point(item.get("StopPosition"))
+    if lat is None:
+        return None
+    return {
+        "type": "bus",
+        "stop_uid": item.get("StopUID", ""),
+        "stop_id": item.get("StopID", ""),
+        "name": _localized_name(item.get("StopName")),
+        "lat": lat,
+        "lng": lng,
+    }
+
+
+def _fetch_paginated(path: str, page_size: int, max_pages: int) -> Union[list, dict]:
+    items: List[dict] = []
+    for page in range(max_pages):
+        raw = _tdx_get_safe(
+            path,
+            {
+                "$format": "JSON",
+                "$top": page_size,
+                "$skip": page * page_size,
+            },
+        )
+        if isinstance(raw, dict) and raw.get("error"):
+            return raw
+        batch = _unwrap_items(raw)
+        if not batch:
+            break
+        items.extend(batch)
+        if len(batch) < page_size:
+            break
+    return items
+
+
+def _load_bus_stops(city: str) -> Union[List[dict], dict]:
+    if city in _bus_stops_error_cache:
+        return {"error": _bus_stops_error_cache[city]}
     if city in _bus_stops_cache:
         return _bus_stops_cache[city]
 
-    raw = _tdx_get(
-        f"/v3/Bus/Stop/City/{city}",
-        {"$format": "JSON", "$top": 10000},
+    # TDX api/basic 的 v3 市區公車僅部分縣市（如 Tainan）；v2 支援 Taipei 等。
+    raw_items = _fetch_paginated(
+        f"/v2/Bus/Stop/City/{city}",
+        BUS_STOP_PAGE_SIZE,
+        BUS_STOP_MAX_PAGES,
     )
+    if isinstance(raw_items, dict) and raw_items.get("error"):
+        _bus_stops_error_cache[city] = raw_items["error"]
+        return raw_items
+
     stops = []
-    for item in _unwrap_items(raw):
-        lat, lng = _parse_point(item.get("StopPosition"))
-        if lat is None:
-            continue
-        stops.append({
-            "type": "bus",
-            "stop_uid": item.get("StopUID", ""),
-            "stop_id": item.get("StopID", ""),
-            "name": _localized_name(item.get("StopName")),
-            "lat": lat,
-            "lng": lng,
-        })
+    for item in raw_items:
+        parsed = _parse_bus_stop(item)
+        if parsed:
+            stops.append(parsed)
     _bus_stops_cache[city] = stops
     return stops
 
 
-def _load_stop_of_route(city: str) -> List[dict]:
+def _load_stop_of_route(city: str) -> Union[List[dict], dict]:
     if city in _stop_of_route_cache:
         return _stop_of_route_cache[city]
 
-    raw = _tdx_get(
-        f"/v3/Bus/StopOfRoute/City/{city}",
-        {"$format": "JSON", "$top": 5000},
+    raw_items = _fetch_paginated(
+        f"/v2/Bus/StopOfRoute/City/{city}",
+        STOP_OF_ROUTE_PAGE_SIZE,
+        STOP_OF_ROUTE_MAX_PAGES,
     )
-    routes = _unwrap_items(raw)
-    _stop_of_route_cache[city] = routes
-    return routes
+    if isinstance(raw_items, dict) and raw_items.get("error"):
+        return raw_items
+
+    _stop_of_route_cache[city] = raw_items
+    return raw_items
 
 
 def _load_s2s_travel_time(city: str) -> List[dict]:
     if city in _s2s_travel_time_cache:
         return _s2s_travel_time_cache[city]
 
-    raw = _tdx_get(
+    raw = _tdx_get_safe(
         f"/v3/Bus/S2STravelTime/City/{city}",
         {"$format": "JSON", "$top": 5000},
     )
+    if isinstance(raw, dict) and raw.get("error"):
+        _s2s_travel_time_cache[city] = []
+        return []
+
     entries = _unwrap_items(raw)
     _s2s_travel_time_cache[city] = entries
     return entries
@@ -123,10 +189,13 @@ def _load_metro_stations(rail_system: str) -> List[dict]:
     if rail_system in _metro_stations_cache:
         return _metro_stations_cache[rail_system]
 
-    raw = _tdx_get(
+    raw = _tdx_get_safe(
         f"/v2/Rail/Metro/Station/{rail_system}",
         {"$format": "JSON"},
     )
+    if isinstance(raw, dict) and raw.get("error"):
+        return []
+
     stations = []
     for item in _unwrap_items(raw):
         lat, lng = _parse_point(item.get("StationPosition"))
@@ -149,10 +218,13 @@ def _load_metro_od_fare(rail_system: str) -> List[dict]:
     if rail_system in _metro_od_fare_cache:
         return _metro_od_fare_cache[rail_system]
 
-    raw = _tdx_get(
+    raw = _tdx_get_safe(
         f"/v2/Rail/Metro/ODFare/{rail_system}",
         {"$format": "JSON", "$top": 10000},
     )
+    if isinstance(raw, dict) and raw.get("error"):
+        return []
+
     entries = _unwrap_items(raw)
     _metro_od_fare_cache[rail_system] = entries
     return entries
@@ -196,8 +268,12 @@ def _walking_leg(
 
 
 def _find_direct_bus_routes(city: str, origin_stop: dict, dest_stop: dict) -> List[dict]:
+    routes = _load_stop_of_route(city)
+    if isinstance(routes, dict) and routes.get("error"):
+        return []
+
     matches = []
-    for route in _load_stop_of_route(city):
+    for route in routes:
         route_uid = route.get("RouteUID")
         route_name = _localized_name(route.get("RouteName"))
         stops_on_route = route.get("Stops") or []
@@ -272,8 +348,10 @@ def _estimate_bus_direct(
     origin_name: str,
     dest_name: str,
     stop_radius_m: int = 800,
-) -> Optional[dict]:
+) -> Union[dict, None]:
     bus_stops = _load_bus_stops(city)
+    if isinstance(bus_stops, dict) and bus_stops.get("error"):
+        return bus_stops
     if not bus_stops:
         return None
 
@@ -289,8 +367,6 @@ def _estimate_bus_direct(
                 continue
             for match in _find_direct_bus_routes(city, origin_stop, dest_stop):
                 ride_minutes = _sum_bus_ride_minutes(city, match)
-                if ride_minutes is None:
-                    continue
                 walk_to = _walking_leg(
                     origin_name,
                     origin_stop["name"],
@@ -309,26 +385,44 @@ def _estimate_bus_direct(
                 )
                 if walk_to.get("error") or walk_from.get("error"):
                     continue
-                total = (
-                    (walk_to.get("duration_minutes") or 0)
-                    + ride_minutes
-                    + (walk_from.get("duration_minutes") or 0)
+
+                walk_total = (walk_to.get("duration_minutes") or 0) + (
+                    walk_from.get("duration_minutes") or 0
                 )
-                candidate = {
-                    "mode": "bus_direct",
-                    "route_name": match["route_name"],
-                    "origin_bus_stop": origin_stop["name"],
-                    "destination_bus_stop": dest_stop["name"],
-                    "bus_minutes": ride_minutes,
-                    "segments": [walk_to, {
-                        "type": "bus",
+                if ride_minutes is None:
+                    candidate = {
+                        "mode": "bus_direct",
                         "route_name": match["route_name"],
-                        "from": origin_stop["name"],
-                        "to": dest_stop["name"],
-                        "duration_minutes": ride_minutes,
-                    }, walk_from],
-                    "total_minutes": total,
-                }
+                        "origin_bus_stop": origin_stop["name"],
+                        "destination_bus_stop": dest_stop["name"],
+                        "bus_minutes": None,
+                        "segments": [walk_to, {
+                            "type": "bus",
+                            "route_name": match["route_name"],
+                            "from": origin_stop["name"],
+                            "to": dest_stop["name"],
+                            "duration_minutes": None,
+                            "note": "找到同路線直達，但此縣市無 TDX 站間時間資料",
+                        }, walk_from],
+                        "total_minutes": walk_total,
+                        "time_note": "僅含步行接驳；公車段時間未提供",
+                    }
+                else:
+                    candidate = {
+                        "mode": "bus_direct",
+                        "route_name": match["route_name"],
+                        "origin_bus_stop": origin_stop["name"],
+                        "destination_bus_stop": dest_stop["name"],
+                        "bus_minutes": ride_minutes,
+                        "segments": [walk_to, {
+                            "type": "bus",
+                            "route_name": match["route_name"],
+                            "from": origin_stop["name"],
+                            "to": dest_stop["name"],
+                            "duration_minutes": ride_minutes,
+                        }, walk_from],
+                        "total_minutes": walk_total + ride_minutes,
+                    }
                 if best is None or candidate["total_minutes"] < best["total_minutes"]:
                     best = candidate
     return best
@@ -432,7 +526,10 @@ def search_nearby_transit_stops(
     transit_type = (transit_type or "all").lower()
 
     if transit_type in {"all", "bus"}:
-        for stop in _nearest_points(_load_bus_stops(city), lat, lng, radius_m, limit):
+        bus_stops = _load_bus_stops(city)
+        if isinstance(bus_stops, dict) and bus_stops.get("error"):
+            return [bus_stops]
+        for stop in _nearest_points(bus_stops, lat, lng, radius_m, limit):
             results.append({
                 "type": "bus",
                 "name": stop["name"],
@@ -496,11 +593,16 @@ def estimate_transit_segment(
             origin_name,
             destination_name,
         )
+        if isinstance(bus, dict) and bus.get("error"):
+            return bus
         if bus:
+            data_source = "TDX 公車路線 + OSRM 步行"
+            if bus.get("bus_minutes") is not None:
+                data_source = "TDX 公車站間旅行時間 + OSRM 步行"
             candidates.append({
                 **bus,
                 "feasible": True,
-                "data_source": "TDX 公車站間旅行時間 + OSRM 步行",
+                "data_source": data_source,
                 "limitations": limitations,
             })
 

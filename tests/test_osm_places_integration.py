@@ -1,4 +1,4 @@
-from osm_places import _is_area_keyword, _resolve_search_area, search_places
+from osm_places import _is_area_keyword, _is_poi_category_keyword, _resolve_search_area, search_places
 from tests.conftest import json_response
 
 
@@ -28,6 +28,70 @@ def overpass_handler(elements):
 def test_is_area_keyword():
     assert _is_area_keyword("花蓮市") is True
     assert _is_area_keyword("赤崁樓") is False
+
+
+def test_is_poi_category_keyword():
+    assert _is_poi_category_keyword("夜市") is True
+    assert _is_poi_category_keyword("寧夏夜市") is False
+
+
+def test_resolve_search_area_category_keyword_uses_city_bbox(mock_httpx):
+    mock_httpx["get_handlers"].append(
+        lambda url, kwargs: json_response([{
+            "display_name": "臺北市, 臺灣",
+            "boundingbox": ["24.96", "25.21", "121.45", "121.66"],
+        }]) if "nominatim.openstreetmap.org" in url else None
+    )
+
+    area = _resolve_search_area("臺北市", "夜市")
+
+    assert area is not None
+    assert area["name_filter"] == "夜市"
+    assert area["north"] - area["south"] > 0.2
+
+
+def test_search_places_night_market_keyword_uses_city_bbox(mock_httpx):
+    captured = {}
+
+    def nominatim_handler(url, kwargs):
+        if "nominatim.openstreetmap.org" not in url:
+            return None
+        query = kwargs.get("params", {}).get("q", "")
+        if query == "臺北市":
+            return json_response([{
+                "display_name": "臺北市, 臺灣",
+                "boundingbox": ["24.96", "25.21", "121.45", "121.66"],
+            }])
+        if "夜市" in query:
+            return json_response([{
+                "display_name": "夜市, 深坑區, 新北市, 臺灣",
+                "boundingbox": ["25.0045929", "25.0054364", "121.6231773", "121.623931"],
+            }])
+        return json_response([])
+
+    def overpass_capture_handler(url, kwargs):
+        if "overpass" in url:
+            captured["query"] = kwargs.get("data", {}).get("data", "")
+            return json_response({
+                "elements": [{
+                    "type": "node",
+                    "lat": 25.055,
+                    "lon": 121.515,
+                    "tags": {"name": "寧夏夜市", "tourism": "attraction", "amenity": "marketplace"},
+                }]
+            })
+        return None
+
+    mock_httpx["get_handlers"].append(nominatim_handler)
+    mock_httpx["post_handlers"].append(overpass_capture_handler)
+
+    results = search_places("Taipei", keyword="夜市", place_type="attraction", limit=5)
+
+    assert len(results) == 1
+    assert results[0]["name"] == "寧夏夜市"
+    assert '["name"~"夜市"' in captured.get("query", "")
+    assert "24.96" in captured.get("query", "")
+    assert 'amenity"="marketplace"' in captured.get("query", "")
 
 
 def test_resolve_search_area_prefers_subregion_for_area_keyword(mock_httpx):

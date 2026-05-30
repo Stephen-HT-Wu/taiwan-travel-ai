@@ -12,6 +12,11 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 NOMINATIM_TIMEOUT = 15.0
 OVERPASS_TIMEOUT = 45.0
 AREA_KEYWORD_RE = re.compile(r"(市|區|鄉|鎮|里)$")
+# POI 類型關鍵字（非具體地名）；若用 Nominatim 縮小 bbox 常會對到錯誤的小點。
+POI_CATEGORY_KEYWORDS = frozenset({
+    "夜市", "商圈", "老街", "溫泉", "温泉", "市集", "傳統市場", "市場",
+})
+MARKET_NAME_KEYWORDS = frozenset({"夜市", "市集", "傳統市場", "市場"})
 
 CITY_ZH = {
     "Taipei": "臺北市",
@@ -53,6 +58,18 @@ def _escape_overpass(value: str) -> str:
 
 def _is_area_keyword(keyword: str) -> bool:
     return bool(AREA_KEYWORD_RE.search(keyword.strip()))
+
+
+def _is_poi_category_keyword(keyword: str) -> bool:
+    return keyword.strip() in POI_CATEGORY_KEYWORDS
+
+
+def _market_related_filter(name_filter: str) -> bool:
+    if not name_filter:
+        return False
+    if name_filter in MARKET_NAME_KEYWORDS:
+        return True
+    return "夜市" in name_filter or "市場" in name_filter
 
 
 def _bbox_span(area: dict) -> float:
@@ -100,6 +117,9 @@ def _resolve_search_area(city_zh: str, keyword: str = "") -> Optional[dict]:
     if not keyword:
         return {**county, "name_filter": ""}
 
+    if _is_poi_category_keyword(keyword):
+        return {**county, "name_filter": keyword}
+
     county_span = _bbox_span(county)
 
     if _is_area_keyword(keyword):
@@ -144,6 +164,8 @@ def _build_query(area: dict, place_type: str, limit: int) -> str:
         tags = [("amenity", "restaurant"), ("amenity", "cafe"), ("amenity", "fast_food")]
     elif place_type == "attraction":
         tags = [("tourism", "attraction"), ("tourism", "museum"), ("historic", "monument"), ("historic", "castle")]
+        if _market_related_filter(name_filter):
+            tags.append(("amenity", "marketplace"))
     else:
         tags = [
             ("tourism", "attraction"),
