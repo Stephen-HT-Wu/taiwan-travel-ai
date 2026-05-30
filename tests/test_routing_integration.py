@@ -71,6 +71,27 @@ def test_get_travel_route_returns_duration_and_distance(mock_httpx):
     assert result["origin"]["lat"] == 25.0527
 
 
+def test_get_travel_route_includes_geocode_warnings(mock_httpx):
+    mock_httpx["get_handlers"].append(
+        nominatim_handler("中山", 25.0527, 121.5200, "捷運中山站, 台北市")
+    )
+    mock_httpx["get_handlers"].append(
+        nominatim_handler("雙城街", 25.0642, 121.5240, "晴光市場, 雙城街, 台北市")
+    )
+    mock_httpx["get_handlers"].append(osrm_handler(2100, 1500))
+
+    result = get_travel_route(
+        "捷運中山站",
+        "雙城街夜市",
+        mode="walking",
+        near="台北市",
+    )
+
+    assert result["geocode_warnings"]
+    assert "雙城街夜市" in result["geocode_warnings"][0]
+    assert "晴光市場" in result["geocode_warnings"][0]
+
+
 def test_get_travel_route_uses_coordinates_when_provided(mock_httpx):
     mock_httpx["get_handlers"].append(osrm_handler(800, 600))
 

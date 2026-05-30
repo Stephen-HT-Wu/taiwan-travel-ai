@@ -80,6 +80,16 @@ def _resolve_point(
     return result
 
 
+def _geocode_warnings(label: str, point: dict) -> list:
+    query = point.get("query")
+    name = point.get("name", "")
+    if not query or query in name:
+        return []
+    return [
+        f"{label}「{query}」已對應至：{name}（{point['lat']}, {point['lng']}）"
+    ]
+
+
 def get_travel_route(
     origin: str,
     destination: str,
@@ -140,6 +150,11 @@ def get_travel_route(
         "cycling": "騎車",
     }
 
+    geocode_warnings = (
+        _geocode_warnings("起點", origin_point)
+        + _geocode_warnings("終點", dest_point)
+    )
+
     return {
         "origin": origin_point,
         "destination": dest_point,
@@ -149,5 +164,6 @@ def get_travel_route(
         "distance_km": round(distance_m / 1000, 1),
         "duration_seconds": round(duration_s),
         "duration_minutes": duration_min,
+        "geocode_warnings": geocode_warnings,
         "note": "步行時間依距離以約 4.5 km/h 估算；開車/騎車為 OSRM 路線時間，不含等車或轉乘",
     }

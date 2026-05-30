@@ -111,6 +111,7 @@ tools = [
             "使用者問「A 到 B 要多久、多遠」時必須使用此工具，不可自行估算。"
             "地點請用中文具體名稱（例如 捷運中山站 中山區、雙城街夜市）。"
             "若先前工具已回傳 lat/lng，可一併傳入以提升準確度。"
+            "回傳含 origin/destination 的 name、query、lat/lng；若 query 與 name 不符代表 geocoding 可能對錯點，回答時須向使用者說明。"
         ),
         "input_schema": {
             "type": "object",
@@ -150,6 +151,14 @@ SYSTEM_PROMPT = """你是一個台灣旅遊規劃助理。
 - 沒有工具資料時，明確告知無法提供精確時間，不要猜測。
 - 回覆時說明交通方式（步行/開車/騎車），並提及 OSRM 估算不含等車或轉乘。
 - 捷運、公車轉乘請另外說明需另行查詢，不要與步行時間混淆。
+
+工具結果驗證規則（尤其 get_travel_route）：
+- 回答前必須閱讀工具回傳的 origin、destination 的 name、query、lat、lng，確認系統實際使用的起終點。
+- 若 query（你輸入的地名）與 name（geocoding 解析結果）明顯不同，必須在回答中清楚告知，例如：「您問的是雙城街夜市，但系統對應到晴光市場（農安街一巷），以下時間依此座標計算。」
+- 禁止用「名字相似」推論地理位置（例如：雙城街≠雙連站、中山≠中山國中），禁止用直覺覆蓋或「修正」工具回傳的座標、距離、時間。
+- 不可自行推薦「最近的捷運站」或「應該搭到哪一站」除非另有工具資料支持；無法確認時，請依 name／座標描述所在區域，並建議使用者用 Google Maps 確認。
+- 若 geocode_warnings 非空，必須優先向使用者說明地點可能對得不準，並建議提供更精確地址後再查。
+- 時間與距離只能引用工具數字；可補充「也可考慮搭公車／捷運」但不可改寫數字，也不可腦補轉乘站名或站距。
 
 回答時用繁體中文，口吻親切自然。"""
 
@@ -218,6 +227,9 @@ def summarize_tool_result(name: str, result) -> dict:
             dest = result.get("destination", {})
             origin_label = origin.get("query") or origin.get("name", "")[:40]
             dest_label = dest.get("query") or dest.get("name", "")[:40]
+            preview = [f"{origin_label} → {dest_label}"]
+            for warning in result.get("geocode_warnings") or []:
+                preview.append(warning[:80])
             return {
                 "ok": True,
                 "count": 1,
@@ -226,7 +238,7 @@ def summarize_tool_result(name: str, result) -> dict:
                     f"{result.get('duration_minutes')} 分鐘（"
                     f"{result.get('distance_km')} 公里）"
                 ),
-                "preview": [f"{origin_label} → {dest_label}"],
+                "preview": preview,
             }
 
     if isinstance(result, list):
