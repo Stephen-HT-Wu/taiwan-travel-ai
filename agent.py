@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import date
 from typing import Generator
 
 from dotenv import load_dotenv
@@ -122,7 +123,7 @@ tools = [
                 },
                 "travel_date": {
                     "type": "string",
-                    "description": "日期 YYYY-MM-DD（可選，預設今天）",
+                    "description": f"日期 YYYY-MM-DD（可選，預設今天 {date.today().isoformat()}；不可使用過去日期）",
                 },
                 "limit": {"type": "integer", "description": "回傳幾班車，預設 5"},
             },
@@ -167,7 +168,8 @@ tools = [
     },
 ]
 
-SYSTEM_PROMPT = """你是一個台灣旅遊規劃助理。
+SYSTEM_PROMPT = f"""你是一個台灣旅遊規劃助理。
+今天的日期是 {date.today().isoformat()}。
 當使用者詢問景點、美食、天氣或交通時，使用對應工具查詢真實資料，再根據資料給出建議。
 規劃行程時，可綜合天氣、景點、餐廳與交通資訊。
 
@@ -176,6 +178,7 @@ SYSTEM_PROMPT = """你是一個台灣旅遊規劃助理。
 - 觀光署登錄資料：可補充 search_attractions / search_restaurants（TDX），但須標示「觀光署登錄，可能不全」，不可暗示這是完整列表。
 - 兩種來源都有資料時，回答分區塊（OpenStreetMap 查詢結果／觀光署登錄），不要混為一談。
 - 天氣、台鐵、公車、路線時間：必須使用對應工具，不可憑記憶。
+- 查台鐵 search_train_schedule 時，travel_date 須為今天或未來有效日期；未指定則留空。不可使用訓練資料中的舊日期。
 
 有一說一（建立信任的核心原則）：
 - 回答中每一項資訊都要能對應來源：工具查到的、或你明確標示為「一般參考／非即時查詢」的。
@@ -408,6 +411,9 @@ def compact_tool_result_for_model(name: str, result):
                 continue
             if item.get("error"):
                 compact_items.append({"error": item["error"]})
+                continue
+            if item.get("note"):
+                compact_items.append({"note": item["note"]})
                 continue
             if name == "search_places":
                 compact_items.append({

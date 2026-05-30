@@ -83,7 +83,7 @@ class GeminiProvider:
 
         self._types = types
         self.client = genai.Client(api_key=api_key)
-        self.model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     def _config(self, system: str, tools: List[dict], max_tokens: int):
         return self._types.GenerateContentConfig(

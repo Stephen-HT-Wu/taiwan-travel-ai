@@ -363,7 +363,7 @@ export default function Chat() {
                 {msg.role === "assistant" ? (
                   <MarkdownContent
                     content={msg.content}
-                    places={resolveDisplayPlaces(msg.content, msg.places ?? [])}
+                    places={msg.places ?? []}
                     mapPlaces={mapPlaces}
                     selectedPlaceId={selectedPlaceId}
                     onPlaceSelect={handleTextPlaceSelect}
@@ -412,7 +412,7 @@ export default function Chat() {
             <div className={styles.bubble}>
               <MarkdownContent
                 content={streamingText}
-                places={streamingVisiblePlaces}
+                places={streamingPlacePool}
                 mapPlaces={mapPlaces}
                 selectedPlaceId={selectedPlaceId}
                 onPlaceSelect={handleTextPlaceSelect}

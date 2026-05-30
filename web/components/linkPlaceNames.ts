@@ -1,5 +1,5 @@
 import type { MapPlace } from "./mapTypes";
-import { filterPlacesMentionedInText, getMatchingKeyInContent } from "./mapTypes";
+import { getMatchingKeyInContent } from "./mapTypes";
 
 function isInsideMarkdownLink(content: string, index: number): boolean {
   let pos = 0;
@@ -17,7 +17,8 @@ function isInsideMarkdownLink(content: string, index: number): boolean {
 
     const urlEnd = content.indexOf(")", textEnd + 2);
     if (urlEnd === -1) {
-      return index >= start;
+      pos = start + 1;
+      continue;
     }
 
     if (index >= start && index <= urlEnd) {
@@ -31,11 +32,10 @@ function isInsideMarkdownLink(content: string, index: number): boolean {
 }
 
 export function linkPlaceNames(content: string, places: MapPlace[]): string {
-  const linkSources = filterPlacesMentionedInText(content, places);
-  if (!linkSources.length) return content;
+  if (!places.length || !content.trim()) return content;
 
   let linked = content;
-  const sorted = [...linkSources].sort((a, b) => b.name.length - a.name.length);
+  const sorted = [...places].sort((a, b) => b.name.length - a.name.length);
 
   for (const place of sorted) {
     const matchKey = getMatchingKeyInContent(place.name, content);

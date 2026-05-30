@@ -1,3 +1,5 @@
+from datetime import date
+
 from tests.conftest import mock_tra_stations, tdx_get_handler
 
 import tdx
@@ -161,3 +163,34 @@ def test_search_train_schedule_supports_legacy_daily_train_info(mock_httpx):
 
     assert results[0]["train_no"] == "133"
     assert results[0]["train_type"] == "區間"
+
+
+def test_search_train_schedule_replaces_past_date(mock_httpx):
+    mock_tra_stations(mock_httpx)
+    mock_httpx["get_handlers"].append(
+        tdx_get_handler(
+            "/v3/Rail/TRA/DailyTrainTimetable/OD/1000/to/4220/",
+            {
+                "TrainTimetables": [
+                    {
+                        "TrainInfo": {
+                            "TrainNo": "133",
+                            "TrainTypeName": {"Zh_tw": "自強"},
+                            "JourneyTime": 240,
+                        },
+                        "StopTimes": [
+                            {"DepartureTime": "08:00"},
+                            {"ArrivalTime": "12:00"},
+                        ],
+                    }
+                ],
+            },
+        )
+    )
+
+    results = search_train_schedule("台北", "台南", travel_date="2024-04-25", limit=1)
+
+    assert results[0]["note"]
+    assert "已過期" in results[0]["note"]
+    assert results[1]["train_no"] == "133"
+    assert results[1]["date"] == date.today().isoformat()

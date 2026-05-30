@@ -50,6 +50,11 @@ export function mergeMapPlaces(existing: MapPlace[], incoming: MapPlaceInput[]):
   return merged;
 }
 
+function addTaiwanScriptVariants(value: string, keys: Set<string>): void {
+  if (value.includes("臺")) keys.add(value.replace(/臺/g, "台"));
+  if (value.includes("台")) keys.add(value.replace(/台/g, "臺"));
+}
+
 function getPlaceMatchKeys(name: string): string[] {
   const trimmed = name.trim();
   const keys = new Set<string>();
@@ -63,21 +68,32 @@ function getPlaceMatchKeys(name: string): string[] {
     keys.add(parenMatch[1].trim());
   }
 
+  for (const key of [...keys]) {
+    addTaiwanScriptVariants(key, keys);
+  }
+
   return [...keys];
+}
+
+function contentIncludesKey(content: string, key: string): boolean {
+  if (content.includes(key)) return true;
+  if (key.includes("臺")) return content.includes(key.replace(/臺/g, "台"));
+  if (key.includes("台")) return content.includes(key.replace(/台/g, "臺"));
+  return false;
 }
 
 export function getMatchingKeyInContent(placeName: string, content: string): string | null {
   if (!content.trim()) return null;
   const keys = getPlaceMatchKeys(placeName).sort((a, b) => b.length - a.length);
   for (const key of keys) {
-    if (content.includes(key)) return key;
+    if (contentIncludesKey(content, key)) return key;
   }
 
   const core = placeName.replace(/[（(][^）)]*[）)]/g, "").trim();
   for (let len = core.length; len >= 3; len--) {
     for (let i = 0; i <= core.length - len; i++) {
       const slice = core.slice(i, i + len);
-      if (content.includes(slice)) return slice;
+      if (contentIncludesKey(content, slice)) return slice;
     }
   }
 

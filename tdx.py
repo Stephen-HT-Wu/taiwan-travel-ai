@@ -1,8 +1,8 @@
 import httpx
 from dotenv import load_dotenv
 import os
-from datetime import date
-from typing import Optional, Union, List, Dict
+from datetime import date, datetime, timedelta
+from typing import Optional, Union, List, Dict, Tuple
 
 load_dotenv()
 
@@ -179,6 +179,30 @@ def search_bus_routes(city: str, keyword: str = "", limit: int = 5) -> List[dict
 
 
 
+def _normalize_travel_date(travel_date: str) -> Tuple[str, Optional[str]]:
+    today = date.today()
+    if not travel_date or not str(travel_date).strip():
+        return today.strftime("%Y-%m-%d"), None
+
+    raw = str(travel_date).strip()
+    try:
+        parsed = datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError:
+        corrected = today.strftime("%Y-%m-%d")
+        return corrected, f"日期格式無效「{raw}」，已改用今天 {corrected}"
+
+    if parsed < today:
+        corrected = today.strftime("%Y-%m-%d")
+        return corrected, f"日期 {raw} 已過期，已改用今天 {corrected}"
+
+    max_date = today + timedelta(days=60)
+    if parsed > max_date:
+        corrected = today.strftime("%Y-%m-%d")
+        return corrected, f"日期 {raw} 超出可查範圍，已改用今天 {corrected}"
+
+    return parsed.strftime("%Y-%m-%d"), None
+
+
 def search_train_schedule(
     origin: str,
     destination: str,
@@ -202,17 +226,31 @@ def search_train_schedule(
             )
         }]
 
-    query_date = travel_date or date.today().strftime("%Y-%m-%d")
+    query_date, date_note = _normalize_travel_date(travel_date)
     params = {"$top": limit, "$format": "JSON"}
-    raw = _tdx_get(
-        f"/v3/Rail/TRA/DailyTrainTimetable/OD/{origin_id}/to/{dest_id}/{query_date}",
-        params,
-    )
+    try:
+        raw = _tdx_get(
+            f"/v3/Rail/TRA/DailyTrainTimetable/OD/{origin_id}/to/{dest_id}/{query_date}",
+            params,
+        )
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 400:
+            return [{
+                "error": (
+                    f"台鐵時刻查詢失敗（日期 {query_date} 可能無時刻表）。"
+                    f"請改用今天或未來日期再試"
+                )
+            }]
+        raise
+
     trains = _unwrap_train_timetables(raw)
     if not trains:
         return [{"error": f"{query_date} {origin}→{destination} 查無班次，請換日期或路線再試"}]
 
     results = []
+    if date_note:
+        results.append({"note": date_note})
+
     for train in trains:
         if not isinstance(train, dict):
             continue
