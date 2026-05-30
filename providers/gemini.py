@@ -6,6 +6,19 @@ from typing import Generator, List
 from providers.base import TextBlock, ToolUseBlock, TurnResult
 
 
+def _friendly_gemini_error(exc: Exception) -> RuntimeError:
+    message = str(exc)
+    upper = message.upper()
+    if "429" in message or "RESOURCE_EXHAUSTED" in upper:
+        return RuntimeError(
+            "Gemini API 配額已用完（429 RESOURCE_EXHAUSTED）。"
+            "Free tier 每日請求數有限，且 agent 每輪對話會消耗多次 API。"
+            "可等到太平洋時間午夜 quota 重置、在 AI Studio 儲值，"
+            "或將 .env 的 LLM_PROVIDER 改為 anthropic 後重啟 backend。"
+        )
+    return RuntimeError(message)
+
+
 def _tools_to_gemini(tools: List[dict]) -> list:
     declarations = []
     for tool in tools:
@@ -107,25 +120,33 @@ class GeminiProvider:
         function_calls = []
         tool_phase_started = False
 
-        for chunk in self.client.models.generate_content_stream(
-            model=self.model,
-            contents=contents,
-            config=config,
-        ):
-            if getattr(chunk, "text", None):
-                text_parts.append(chunk.text)
-                yield {"event": "text_delta", "text": chunk.text}
+        try:
+            stream = self.client.models.generate_content_stream(
+                model=self.model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as exc:
+            raise _friendly_gemini_error(exc) from exc
 
-            for candidate in getattr(chunk, "candidates", None) or []:
-                content = getattr(candidate, "content", None)
-                for part in getattr(content, "parts", None) or []:
-                    function_call = getattr(part, "function_call", None)
-                    if not function_call:
-                        continue
-                    function_calls.append(function_call)
-                    if not tool_phase_started:
-                        tool_phase_started = True
-                        yield {"event": "tool_use_start"}
+        try:
+            for chunk in stream:
+                if getattr(chunk, "text", None):
+                    text_parts.append(chunk.text)
+                    yield {"event": "text_delta", "text": chunk.text}
+
+                for candidate in getattr(chunk, "candidates", None) or []:
+                    content = getattr(candidate, "content", None)
+                    for part in getattr(content, "parts", None) or []:
+                        function_call = getattr(part, "function_call", None)
+                        if not function_call:
+                            continue
+                        function_calls.append(function_call)
+                        if not tool_phase_started:
+                            tool_phase_started = True
+                            yield {"event": "tool_use_start"}
+        except Exception as exc:
+            raise _friendly_gemini_error(exc) from exc
 
         return self._build_turn_result(text_parts, function_calls)
 
@@ -139,11 +160,14 @@ class GeminiProvider:
     ) -> TurnResult:
         contents = _anthropic_messages_to_gemini(messages)
         config = self._config(system, tools, max_tokens)
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=contents,
-            config=config,
-        )
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=config,
+            )
+        except Exception as exc:
+            raise _friendly_gemini_error(exc) from exc
 
         text_parts = []
         function_calls = []

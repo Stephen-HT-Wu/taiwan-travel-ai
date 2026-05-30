@@ -1,10 +1,16 @@
 from datetime import date
 
-from tests.conftest import mock_tra_stations, tdx_get_handler
+from tests.conftest import mock_hsr_stations, mock_tra_stations, tdx_get_handler
 
 import tdx
 
-from tdx import search_attractions, search_bus_routes, search_restaurants, search_train_schedule
+from tdx import (
+    search_attractions,
+    search_bus_routes,
+    search_hsr_schedule,
+    search_restaurants,
+    search_train_schedule,
+)
 
 
 def test_search_attractions_parses_tdx_response(mock_httpx):
@@ -194,3 +200,54 @@ def test_search_train_schedule_replaces_past_date(mock_httpx):
     assert "已過期" in results[0]["note"]
     assert results[1]["train_no"] == "133"
     assert results[1]["date"] == date.today().isoformat()
+
+
+def test_get_hsr_station_ids_loads_aliases(mock_httpx):
+    mock_hsr_stations(mock_httpx)
+
+    station_ids = tdx.get_hsr_station_ids()
+
+    assert station_ids["台北"] == "1"
+    assert station_ids["左營"] == "2"
+    assert station_ids["高雄"] == "2"
+
+
+def test_search_hsr_schedule_unknown_station_returns_error(mock_httpx):
+    mock_hsr_stations(mock_httpx)
+    results = search_hsr_schedule("不存在", "左營")
+
+    assert results[0]["error"]
+    assert "不支援的高鐵站名" in results[0]["error"]
+
+
+def test_search_hsr_schedule_parses_tdx_response(mock_httpx):
+    mock_hsr_stations(mock_httpx)
+    mock_httpx["get_handlers"].append(
+        tdx_get_handler(
+            "/v2/Rail/THSR/DailyTimetable/OD/1/to/2/",
+            [
+                {
+                    "TrainDate": "2026-06-01",
+                    "DailyTrainInfo": {"TrainNo": "123"},
+                    "OriginStopTime": {
+                        "DepartureTime": "08:00",
+                        "StationID": "1",
+                    },
+                    "DestinationStopTime": {
+                        "ArrivalTime": "09:30",
+                        "StationID": "2",
+                    },
+                }
+            ],
+        )
+    )
+
+    results = search_hsr_schedule("台北", "高雄", travel_date="2026-06-01", limit=1)
+
+    assert results[0]["train_no"] == "123"
+    assert results[0]["train_type"] == "高鐵"
+    assert results[0]["departure_time"] == "08:00"
+    assert results[0]["arrival_time"] == "09:30"
+    assert results[0]["origin"] == "台北"
+    assert results[0]["destination"] == "左營"
+    assert results[0]["duration_minutes"] == 90

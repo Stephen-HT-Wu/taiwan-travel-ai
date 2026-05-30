@@ -5,7 +5,7 @@ from typing import Generator
 
 from dotenv import load_dotenv
 
-from tdx import search_attractions, search_restaurants, search_bus_routes, search_train_schedule
+from tdx import search_attractions, search_restaurants, search_bus_routes, search_train_schedule, search_hsr_schedule
 from cwa import get_weather_forecast
 from routing import get_travel_route
 from osm_places import search_places
@@ -131,6 +131,33 @@ tools = [
         },
     },
     {
+        "name": "search_hsr_schedule",
+        "description": (
+            "查詢台灣高鐵兩站之間的列車時刻表。"
+            "僅支援 12 個高鐵站（南港、台北、板橋、桃園、新竹、苗栗、台中、彰化、雲林、嘉義、台南、左營）；"
+            "使用者說高雄時請查左營。與台鐵不同工具，不可混用。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origin": {
+                    "type": "string",
+                    "description": "出發站中文名，例如 台北、台中、左營",
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "目的站中文名，例如 台北、台中、左營（高雄請用左營）",
+                },
+                "travel_date": {
+                    "type": "string",
+                    "description": f"日期 YYYY-MM-DD（可選，預設今天 {date.today().isoformat()}；不可使用過去日期，約 45 天內可查）",
+                },
+                "limit": {"type": "integer", "description": "回傳幾班車，預設 5"},
+            },
+            "required": ["origin", "destination"],
+        },
+    },
+    {
         "name": "get_travel_route",
         "description": (
             "查詢兩地之間的步行、開車或騎車路線時間與距離。"
@@ -177,8 +204,9 @@ SYSTEM_PROMPT = f"""你是一個台灣旅遊規劃助理。
 - 景點、古蹟、美食推薦：優先使用 search_places（OpenStreetMap），結果可作為已查證推薦並顯示於地圖。
 - 觀光署登錄資料：可補充 search_attractions / search_restaurants（TDX），但須標示「觀光署登錄，可能不全」，不可暗示這是完整列表。
 - 兩種來源都有資料時，回答分區塊（OpenStreetMap 查詢結果／觀光署登錄），不要混為一談。
-- 天氣、台鐵、公車、路線時間：必須使用對應工具，不可憑記憶。
+- 天氣、台鐵、高鐵、公車、路線時間：必須使用對應工具，不可憑記憶。
 - 查台鐵 search_train_schedule 時，travel_date 須為今天或未來有效日期；未指定則留空。不可使用訓練資料中的舊日期。
+- 查高鐵 search_hsr_schedule 時，同樣須使用有效日期；高雄目的地請查左營站，不可查台鐵站名。
 
 有一說一（建立信任的核心原則）：
 - 回答中每一項資訊都要能對應來源：工具查到的、或你明確標示為「一般參考／非即時查詢」的。
@@ -226,6 +254,7 @@ TOOL_HANDLERS = {
     "get_weather_forecast": get_weather_forecast,
     "search_bus_routes": search_bus_routes,
     "search_train_schedule": search_train_schedule,
+    "search_hsr_schedule": search_hsr_schedule,
     "get_travel_route": get_travel_route,
 }
 
@@ -260,6 +289,11 @@ TOOL_META = {
         "source": "TDX 台鐵時刻表",
         "provider": "交通部 TDX",
     },
+    "search_hsr_schedule": {
+        "label": "查詢高鐵時刻",
+        "source": "TDX 高鐵時刻表",
+        "provider": "交通部 TDX",
+    },
     "get_travel_route": {
         "label": "規劃路線",
         "source": "OSRM 路線估算",
@@ -283,6 +317,7 @@ EMPTY_TOOL_NOTES = {
     ),
     "search_bus_routes": "公車路線查無結果。",
     "search_train_schedule": "台鐵時刻查無結果。",
+    "search_hsr_schedule": "高鐵時刻查無結果。",
 }
 
 
@@ -452,7 +487,7 @@ def compact_tool_result_for_model(name: str, result):
                     "from": item.get("from"),
                     "to": item.get("to"),
                 })
-            elif name == "search_train_schedule":
+            elif name in {"search_train_schedule", "search_hsr_schedule"}:
                 compact_items.append({
                     "train_no": item.get("train_no"),
                     "train_type": item.get("train_type"),

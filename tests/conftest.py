@@ -10,9 +10,11 @@ import tdx
 def reset_tdx_token_cache():
     tdx._token_cache = None
     tdx._station_ids_cache = None
+    tdx._hsr_station_ids_cache = None
     yield
     tdx._token_cache = None
     tdx._station_ids_cache = None
+    tdx._hsr_station_ids_cache = None
 
 
 @pytest.fixture
@@ -90,4 +92,15 @@ def mock_tra_stations(mock_httpx, stations=None):
         ]
     mock_httpx["get_handlers"].append(
         tdx_get_handler("/v3/Rail/TRA/Station", {"Stations": stations})
+    )
+
+
+def mock_hsr_stations(mock_httpx, stations=None):
+    if stations is None:
+        stations = [
+            {"StationID": "1", "StationName": {"Zh_tw": "台北"}},
+            {"StationID": "2", "StationName": {"Zh_tw": "左營"}},
+        ]
+    mock_httpx["get_handlers"].append(
+        tdx_get_handler("/v2/Rail/THSR/Station", {"Stations": stations})
     )

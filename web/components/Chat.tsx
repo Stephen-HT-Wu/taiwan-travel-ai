@@ -43,6 +43,8 @@ const SUGGESTIONS = [
   "從台北到台南，台鐵有哪些班次？",
 ];
 
+const USER_FACING_ERROR = "抱歉，目前無法完成查詢，請稍後再試。";
+
 const PHASE_LABELS: Record<Phase, string> = {
   thinking: "理解問題",
   tool: "查詢資料",
@@ -183,9 +185,8 @@ export default function Chat() {
       });
 
       if (!res.ok || !res.body) {
-        throw new Error(
-          `API 請求失敗 (${res.status})，請確認後端已啟動：uvicorn api:app --reload --port 8000`
-        );
+        console.error("[chat] API request failed", { status: res.status });
+        throw new Error(USER_FACING_ERROR);
       }
 
       const reader = res.body.getReader();
@@ -269,10 +270,8 @@ export default function Chat() {
             setPhaseMessage("");
             setActivities([]);
           } else if (event === "error") {
-            const errorText = parsed.message
-              ? `發生錯誤：${parsed.message}`
-              : "發生錯誤，請稍後再試。";
-            commitAssistantMessage(accumulated || errorText, currentPlaces);
+            console.error("[chat] stream error", parsed);
+            commitAssistantMessage(accumulated || USER_FACING_ERROR, currentPlaces);
             setStreamingText("");
             setStreamingPlacePool([]);
             setPhase(null);
@@ -293,11 +292,12 @@ export default function Chat() {
       setPhaseMessage("");
       setActivities([]);
     } catch (err) {
+      console.error("[chat] request failed", err);
       setMessages((prev) => [
         ...prev,
         {
           role: "assistant",
-          content: `發生錯誤：${err instanceof Error ? err.message : "未知錯誤"}`,
+          content: USER_FACING_ERROR,
         },
       ]);
       setStreamingText("");
