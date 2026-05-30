@@ -250,6 +250,28 @@
   font-weight: 600;
 }
 
+.placeLink {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.placeLink:hover {
+  opacity: 0.85;
+}
+
+.placeLinkActive {
+  color: #fbbf24;
+  text-decoration-thickness: 2px;
+}
+
 .cursor {
   animation: blink 1s step-end infinite;
   color: var(--accent);

@@ -2,11 +2,14 @@
 
 import { useEffect, useRef } from "react";
 import "leaflet/dist/leaflet.css";
-import type { MapPlace } from "./mapTypes";
+import type { MapFocusTarget, MapPlace } from "./mapTypes";
 import styles from "./MapPanel.module.css";
 
 type MapPanelProps = {
   places: MapPlace[];
+  selectedPlaceId?: string | null;
+  focusTarget?: MapFocusTarget | null;
+  onPlaceSelect?: (place: MapPlace) => void;
 };
 
 const TYPE_COLORS: Record<MapPlace["type"], string> = {
@@ -14,15 +17,22 @@ const TYPE_COLORS: Record<MapPlace["type"], string> = {
   restaurant: "#f59e0b",
 };
 
-const TYPE_LABELS: Record<MapPlace["type"], string> = {
-  attraction: "景點",
-  restaurant: "餐廳",
-};
+const SELECTED_ZOOM = 16;
 
-export default function MapPanel({ places }: MapPanelProps) {
+export default function MapPanel({
+  places,
+  selectedPlaceId = null,
+  focusTarget = null,
+  onPlaceSelect,
+}: MapPanelProps) {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<import("leaflet").Map | null>(null);
   const markersLayerRef = useRef<import("leaflet").LayerGroup | null>(null);
+  const onPlaceSelectRef = useRef(onPlaceSelect);
+  const lastPlacesKeyRef = useRef("");
+  const mapReadyRef = useRef(false);
+
+  onPlaceSelectRef.current = onPlaceSelect;
 
   useEffect(() => {
     let cancelled = false;
@@ -45,12 +55,15 @@ export default function MapPanel({ places }: MapPanelProps) {
 
       mapInstanceRef.current = map;
       markersLayerRef.current = L.layerGroup().addTo(map);
+      mapReadyRef.current = true;
+      map.invalidateSize();
     }
 
     initMap();
 
     return () => {
       cancelled = true;
+      mapReadyRef.current = false;
       mapInstanceRef.current?.remove();
       mapInstanceRef.current = null;
       markersLayerRef.current = null;
@@ -66,38 +79,70 @@ export default function MapPanel({ places }: MapPanelProps) {
       const L = (await import("leaflet")).default;
       layer.clearLayers();
 
-      if (places.length === 0) return;
+      if (places.length === 0) {
+        lastPlacesKeyRef.current = "";
+        return;
+      }
+
+      const placesKey = places.map((place) => place.id).join("|");
+      const placesChanged = placesKey !== lastPlacesKeyRef.current;
+      lastPlacesKeyRef.current = placesKey;
 
       const bounds = L.latLngBounds([]);
 
       for (const place of places) {
         const color = TYPE_COLORS[place.type];
+        const isSelected = place.id === selectedPlaceId;
         const marker = L.circleMarker([place.lat, place.lng], {
-          radius: 9,
-          color,
-          weight: 2,
+          radius: isSelected ? 13 : 9,
+          color: isSelected ? "#ffffff" : color,
+          weight: isSelected ? 3 : 2,
           fillColor: color,
-          fillOpacity: 0.85,
+          fillOpacity: isSelected ? 1 : 0.85,
         });
 
-        marker.bindPopup(
-          `<strong>${place.name}</strong><br/>` +
-            `<span style="opacity:0.8">${TYPE_LABELS[place.type]}</span>` +
-            (place.address ? `<br/>${place.address}` : "")
-        );
+        marker.bindTooltip(place.name, {
+          permanent: true,
+          direction: "top",
+          offset: L.point(0, -12),
+          className: styles.markerTooltip,
+        });
+
+        marker.on("click", () => {
+          onPlaceSelectRef.current?.(place);
+        });
+
         marker.addTo(layer);
         bounds.extend([place.lat, place.lng]);
       }
 
-      if (places.length === 1) {
-        map.setView([places[0].lat, places[0].lng], 13);
-      } else {
-        map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+      if (!selectedPlaceId && placesChanged) {
+        map.invalidateSize();
+        if (places.length === 1) {
+          map.setView([places[0].lat, places[0].lng], 13);
+        } else {
+          map.fitBounds(bounds, { padding: [48, 48], maxZoom: 14 });
+        }
       }
     }
 
     updateMarkers();
-  }, [places]);
+  }, [places, selectedPlaceId]);
+
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !focusTarget || !mapReadyRef.current) return;
+
+    map.invalidateSize();
+    const frame = requestAnimationFrame(() => {
+      map.flyTo([focusTarget.lat, focusTarget.lng], SELECTED_ZOOM, {
+        animate: true,
+        duration: 0.45,
+      });
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [focusTarget?.nonce]);
 
   return (
     <div className={styles.panel}>
@@ -117,6 +162,9 @@ export default function MapPanel({ places }: MapPanelProps) {
           <span className={styles.dot} style={{ background: TYPE_COLORS.restaurant }} />
           餐廳
         </span>
+        {places.length > 0 && (
+          <span className={styles.legendHint}>點選標記或內文地名可互相對應</span>
+        )}
       </div>
 
       <div ref={mapRef} className={styles.map} />

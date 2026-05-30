@@ -4,7 +4,8 @@ import { useState, useRef, useEffect, FormEvent, KeyboardEvent } from "react";
 import dynamic from "next/dynamic";
 import styles from "./Chat.module.css";
 import MarkdownContent from "./MarkdownContent";
-import type { MapPlace, MapPlaceInput } from "./mapTypes";
+import type { MapFocusTarget, MapPlace, MapPlaceInput } from "./mapTypes";
+import { mergeMapPlaces } from "./mapTypes";
 
 const MapPanel = dynamic(() => import("./MapPanel"), { ssr: false });
 
@@ -12,6 +13,7 @@ type Message = {
   role: "user" | "assistant";
   content: string;
   activities?: ActivityItem[];
+  places?: MapPlace[];
 };
 
 type Phase = "thinking" | "tool" | "writing" | "done";
@@ -55,6 +57,9 @@ export default function Chat() {
   const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [streamingText, setStreamingText] = useState("");
   const [mapPlaces, setMapPlaces] = useState<MapPlace[]>([]);
+  const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
+  const [mapFocus, setMapFocus] = useState<MapFocusTarget | null>(null);
+  const [streamingPlaces, setStreamingPlaces] = useState<MapPlace[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
   const composingRef = useRef(false);
   const enterToConfirmImeRef = useRef(false);
@@ -64,9 +69,25 @@ export default function Chat() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streamingText, activities, phase]);
 
+  useEffect(() => {
+    if (!selectedPlaceId) return;
+    document
+      .querySelector(`[data-place-id="${selectedPlaceId}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [selectedPlaceId]);
+
   function nextActivityId(prefix: string) {
     activityCounter.current += 1;
     return `${prefix}-${activityCounter.current}`;
+  }
+
+  function handlePlaceSelect(place: MapPlace) {
+    setSelectedPlaceId(place.id);
+    setMapFocus({
+      lat: place.lat,
+      lng: place.lng,
+      nonce: Date.now(),
+    });
   }
 
   async function sendMessage(text: string) {
@@ -79,10 +100,13 @@ export default function Chat() {
     setPhaseMessage("正在理解你的問題...");
     setActivities([]);
     setStreamingText("");
-    setMapPlaces([]);
+    setStreamingPlaces([]);
+    setSelectedPlaceId(null);
+    setMapFocus(null);
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
 
     const currentActivities: ActivityItem[] = [];
+    let currentPlaces: MapPlace[] = [];
     let accumulated = "";
 
     try {
@@ -166,7 +190,9 @@ export default function Chat() {
               setActivities([...currentActivities]);
             }
             if (parsed.places?.length) {
-              setMapPlaces((prev) => mergeMapPlaces(prev, parsed.places, parsed.id));
+              currentPlaces = mergeMapPlaces(currentPlaces, parsed.places as MapPlaceInput[]);
+              setStreamingPlaces([...currentPlaces]);
+              setMapPlaces((prev) => mergeMapPlaces(prev, parsed.places as MapPlaceInput[]));
             }
           } else if (event === "done") {
             if (accumulated) {
@@ -176,10 +202,12 @@ export default function Chat() {
                   role: "assistant",
                   content: accumulated,
                   activities: [...currentActivities],
+                  places: [...currentPlaces],
                 },
               ]);
             }
             setStreamingText("");
+            setStreamingPlaces([]);
             setPhase(null);
             setPhaseMessage("");
             setActivities([]);
@@ -198,11 +226,13 @@ export default function Chat() {
               role: "assistant",
               content: accumulated,
               activities: [...currentActivities],
+              places: [...currentPlaces],
             },
           ];
         });
       }
       setStreamingText("");
+      setStreamingPlaces([]);
       setPhase(null);
       setPhaseMessage("");
       setActivities([]);
@@ -274,7 +304,13 @@ export default function Chat() {
             <div className={`${styles.message} ${styles[msg.role]}`}>
               <div className={styles.bubble}>
                 {msg.role === "assistant" ? (
-                  <MarkdownContent content={msg.content} />
+                  <MarkdownContent
+                    content={msg.content}
+                    places={msg.places ?? []}
+                    mapPlaces={mapPlaces}
+                    selectedPlaceId={selectedPlaceId}
+                    onPlaceSelect={handlePlaceSelect}
+                  />
                 ) : (
                   msg.content
                 )}
@@ -317,7 +353,13 @@ export default function Chat() {
         {streamingText && (
           <div className={`${styles.message} ${styles.assistant}`}>
             <div className={styles.bubble}>
-              <MarkdownContent content={streamingText} />
+              <MarkdownContent
+                content={streamingText}
+                places={streamingPlaces}
+                mapPlaces={mapPlaces}
+                selectedPlaceId={selectedPlaceId}
+                onPlaceSelect={handlePlaceSelect}
+              />
               <span className={styles.cursor}>▊</span>
             </div>
           </div>
@@ -356,7 +398,12 @@ export default function Chat() {
       </div>
 
       <aside className={styles.mapColumn}>
-        <MapPanel places={mapPlaces} />
+        <MapPanel
+          places={mapPlaces}
+          selectedPlaceId={selectedPlaceId}
+          focusTarget={mapFocus}
+          onPlaceSelect={handlePlaceSelect}
+        />
       </aside>
     </div>
   );
@@ -425,29 +472,4 @@ function isPhaseDone(step: Phase, current: Phase | null) {
   const stepIdx = order.indexOf(step);
   const currentIdx = current ? order.indexOf(current) : -1;
   return currentIdx > stepIdx;
-}
-
-function mergeMapPlaces(
-  existing: MapPlace[],
-  incoming: MapPlaceInput[],
-  toolId: string
-): MapPlace[] {
-  const merged = [...existing];
-
-  for (const [index, place] of incoming.entries()) {
-    const duplicate = merged.some(
-      (item) =>
-        item.name === place.name &&
-        item.lat === place.lat &&
-        item.lng === place.lng
-    );
-    if (duplicate) continue;
-
-    merged.push({
-      ...place,
-      id: `${toolId}-${index}-${place.name}`,
-    });
-  }
-
-  return merged;
 }
