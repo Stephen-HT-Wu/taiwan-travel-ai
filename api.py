@@ -1,12 +1,15 @@
 import json
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from agent import stream_agent
+
+load_dotenv(override=True)
 
 # 每個 session 保留對話歷史（demo 用途）
 sessions: dict[str, list] = {}

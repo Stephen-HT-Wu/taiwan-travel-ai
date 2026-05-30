@@ -88,7 +88,7 @@ def search_restaurants(city: str, keyword: str = "", limit: int = 5) -> List[dic
 def search_bus_routes(city: str, keyword: str = "", limit: int = 5) -> List[dict]:
     params = {
         "$top": limit,
-        "$select": "RouteUID,RouteName,SubRouteName,BusRouteType,DepartureStopNameZh,DestinationStopNameZh",
+        "$select": "RouteUID,RouteName,SubRoutes,BusRouteType,DepartureStopNameZh,DestinationStopNameZh",
         "$format": "JSON",
     }
     if keyword:
@@ -99,9 +99,16 @@ def search_bus_routes(city: str, keyword: str = "", limit: int = 5) -> List[dict
     results = []
     for route in routes:
         route_name = route.get("RouteName") or {}
+        sub_routes = route.get("SubRoutes") or []
+        sub_route_names = []
+        for sub in sub_routes[:3]:
+            name = (sub.get("SubRouteName") or {}).get("Zh_tw")
+            if name and name not in sub_route_names:
+                sub_route_names.append(name)
+
         results.append({
             "route_name": route_name.get("Zh_tw") or route_name.get("En") or "",
-            "sub_route": route.get("SubRouteName", ""),
+            "sub_route": "、".join(sub_route_names),
             "route_type": route.get("BusRouteType", ""),
             "from": route.get("DepartureStopNameZh", ""),
             "to": route.get("DestinationStopNameZh", ""),

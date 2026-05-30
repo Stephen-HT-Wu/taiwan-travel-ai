@@ -6,12 +6,25 @@ import styles from "./Chat.module.css";
 type Message = {
   role: "user" | "assistant";
   content: string;
+  activities?: ActivityItem[];
 };
 
-type ToolEvent = {
-  name: string;
+type Phase = "thinking" | "tool" | "writing" | "done";
+
+type ActivityItem = {
+  id: string;
+  type: "status" | "tool";
+  phase?: Phase;
+  message?: string;
+  name?: string;
+  label?: string;
+  source?: string;
+  provider?: string;
+  status?: "running" | "done" | "error";
   input?: Record<string, unknown>;
-  status: "running" | "done";
+  summary?: string;
+  preview?: string[];
+  count?: number;
 };
 
 const SUGGESTIONS = [
@@ -21,17 +34,34 @@ const SUGGESTIONS = [
   "從台北到台南，台鐵有哪些班次？",
 ];
 
+const PHASE_LABELS: Record<Phase, string> = {
+  thinking: "理解問題",
+  tool: "查詢資料",
+  writing: "生成回答",
+  done: "完成",
+};
+
 export default function Chat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
-  const [tools, setTools] = useState<ToolEvent[]>([]);
+  const [phase, setPhase] = useState<Phase | null>(null);
+  const [phaseMessage, setPhaseMessage] = useState("");
+  const [activities, setActivities] = useState<ActivityItem[]>([]);
   const [streamingText, setStreamingText] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
+  const composingRef = useRef(false);
+  const enterToConfirmImeRef = useRef(false);
+  const activityCounter = useRef(0);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingText, tools]);
+  }, [messages, streamingText, activities, phase]);
+
+  function nextActivityId(prefix: string) {
+    activityCounter.current += 1;
+    return `${prefix}-${activityCounter.current}`;
+  }
 
   async function sendMessage(text: string) {
     if (!text.trim() || loading) return;
@@ -39,9 +69,14 @@ export default function Chat() {
     const userMessage = text.trim();
     setInput("");
     setLoading(true);
-    setTools([]);
+    setPhase("thinking");
+    setPhaseMessage("正在理解你的問題...");
+    setActivities([]);
     setStreamingText("");
     setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
+
+    const currentActivities: ActivityItem[] = [];
+    let accumulated = "";
 
     try {
       const res = await fetch("/api/chat", {
@@ -51,13 +86,14 @@ export default function Chat() {
       });
 
       if (!res.ok || !res.body) {
-        throw new Error(`API 請求失敗 (${res.status})，請確認後端已啟動：uvicorn api:app --reload --port 8000`);
+        throw new Error(
+          `API 請求失敗 (${res.status})，請確認後端已啟動：uvicorn api:app --reload --port 8000`
+        );
       }
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let accumulated = "";
 
       while (true) {
         const { done, value } = await reader.read();
@@ -80,41 +116,98 @@ export default function Chat() {
           if (!event || !data) continue;
           const parsed = JSON.parse(data);
 
-          if (event === "text_delta") {
+          if (event === "status") {
+            setPhase(parsed.phase);
+            setPhaseMessage(parsed.message || PHASE_LABELS[parsed.phase as Phase] || "");
+
+            const statusItem: ActivityItem = {
+              id: nextActivityId("status"),
+              type: "status",
+              phase: parsed.phase,
+              message: parsed.message,
+            };
+            currentActivities.push(statusItem);
+            setActivities([...currentActivities]);
+          } else if (event === "text_delta") {
             accumulated += parsed.text;
             setStreamingText(accumulated);
           } else if (event === "tool_start") {
-            setTools((prev) => [
-              ...prev,
-              { name: parsed.name, input: parsed.input, status: "running" },
-            ]);
+            const toolItem: ActivityItem = {
+              id: parsed.id || nextActivityId("tool"),
+              type: "tool",
+              name: parsed.name,
+              label: parsed.label,
+              source: parsed.source,
+              provider: parsed.provider,
+              input: parsed.input,
+              status: "running",
+            };
+            currentActivities.push(toolItem);
+            setActivities([...currentActivities]);
           } else if (event === "tool_end") {
-            setTools((prev) =>
-              prev.map((t) =>
-                t.name === parsed.name && t.status === "running"
-                  ? { ...t, status: "done" }
-                  : t
-              )
+            const idx = currentActivities.findIndex(
+              (item) => item.type === "tool" && item.id === parsed.id
             );
+            if (idx >= 0) {
+              currentActivities[idx] = {
+                ...currentActivities[idx],
+                status: parsed.ok === false ? "error" : "done",
+                summary: parsed.summary,
+                preview: parsed.preview,
+                count: parsed.count,
+              };
+              setActivities([...currentActivities]);
+            }
           } else if (event === "done") {
             if (accumulated) {
               setMessages((prev) => [
                 ...prev,
-                { role: "assistant", content: accumulated },
+                {
+                  role: "assistant",
+                  content: accumulated,
+                  activities: [...currentActivities],
+                },
               ]);
             }
             setStreamingText("");
-            setTools([]);
+            setPhase(null);
+            setPhaseMessage("");
+            setActivities([]);
           }
         }
       }
+
+      // 串流結束但沒收到 done 時，仍保留已串流的文字
+      if (accumulated) {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant" && last.content === accumulated) return prev;
+          return [
+            ...prev,
+            {
+              role: "assistant",
+              content: accumulated,
+              activities: [...currentActivities],
+            },
+          ];
+        });
+      }
+      setStreamingText("");
+      setPhase(null);
+      setPhaseMessage("");
+      setActivities([]);
     } catch (err) {
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: `發生錯誤：${err instanceof Error ? err.message : "未知錯誤"}` },
+        {
+          role: "assistant",
+          content: `發生錯誤：${err instanceof Error ? err.message : "未知錯誤"}`,
+        },
       ]);
       setStreamingText("");
-      setTools([]);
+      setActivities([]);
+      setPhase(null);
+      setPhaseMessage("");
     } finally {
       setLoading(false);
     }
@@ -126,10 +219,19 @@ export default function Chat() {
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      sendMessage(input);
+    if (e.key !== "Enter" || e.shiftKey) return;
+
+    // IME 組字中：Enter 用來選字，不送出
+    if (e.nativeEvent.isComposing || composingRef.current) return;
+
+    // 剛用 Enter 確認選字：略過這次 Enter，避免誤送或無法再按
+    if (enterToConfirmImeRef.current) {
+      enterToConfirmImeRef.current = false;
+      return;
     }
+
+    e.preventDefault();
+    sendMessage(input);
   }
 
   return (
@@ -157,26 +259,41 @@ export default function Chat() {
         )}
 
         {messages.map((msg, i) => (
-          <div key={i} className={`${styles.message} ${styles[msg.role]}`}>
-            <div className={styles.bubble}>{msg.content}</div>
+          <div key={i}>
+            <div className={`${styles.message} ${styles[msg.role]}`}>
+              <div className={styles.bubble}>{msg.content}</div>
+            </div>
+            {msg.activities && msg.activities.length > 0 && (
+              <ActivityPanel items={msg.activities} compact />
+            )}
           </div>
         ))}
 
-        {tools.length > 0 && (
-          <div className={styles.toolPanel}>
-            {tools.map((tool, i) => (
-              <div key={i} className={`${styles.toolItem} ${styles[tool.status]}`}>
-                <span className={styles.toolIcon}>{tool.status === "running" ? "⚙️" : "✓"}</span>
-                <span className={styles.toolName}>{toolLabel(tool.name)}</span>
-                {tool.input && (
-                  <span className={styles.toolInput}>
-                    {Object.entries(tool.input)
-                      .map(([k, v]) => `${k}: ${v}`)
-                      .join(", ")}
-                  </span>
-                )}
-              </div>
-            ))}
+        {loading && (
+          <div className={styles.progressPanel}>
+            <div className={styles.progressHeader}>
+              <span className={styles.progressSpinner} />
+              <span>{phaseMessage || "處理中..."}</span>
+            </div>
+
+            <div className={styles.phaseBar}>
+              {(["thinking", "tool", "writing"] as Phase[]).map((step) => (
+                <div
+                  key={step}
+                  className={`${styles.phaseStep} ${
+                    phase === step
+                      ? styles.phaseActive
+                      : isPhaseDone(step, phase)
+                        ? styles.phaseDone
+                        : ""
+                  }`}
+                >
+                  {PHASE_LABELS[step]}
+                </div>
+              ))}
+            </div>
+
+            {activities.length > 0 && <ActivityPanel items={activities} />}
           </div>
         )}
 
@@ -189,14 +306,6 @@ export default function Chat() {
           </div>
         )}
 
-        {loading && !streamingText && tools.length === 0 && (
-          <div className={styles.thinking}>
-            <span className={styles.dot} />
-            <span className={styles.dot} />
-            <span className={styles.dot} />
-          </div>
-        )}
-
         <div ref={bottomRef} />
       </main>
 
@@ -205,26 +314,93 @@ export default function Chat() {
           className={styles.input}
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onCompositionStart={() => {
+            composingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+            enterToConfirmImeRef.current = true;
+          }}
+          onBlur={() => {
+            composingRef.current = false;
+          }}
           onKeyDown={handleKeyDown}
           placeholder="例如：台南有什麼古蹟？明天會下雨嗎？"
-          rows={1}
+          rows={2}
           disabled={loading}
         />
-        <button type="submit" className={styles.sendBtn} disabled={loading || !input.trim()}>
-          送出
-        </button>
+        <div className={styles.inputActions}>
+          <span className={styles.inputHint}>Enter 送出 · Shift+Enter 換行</span>
+          <button type="submit" className={styles.sendBtn} disabled={loading || !input.trim()}>
+            送出
+          </button>
+        </div>
       </form>
     </div>
   );
 }
 
-function toolLabel(name: string): string {
-  const labels: Record<string, string> = {
-    search_attractions: "查詢景點",
-    search_restaurants: "查詢餐廳",
-    get_weather_forecast: "查詢天氣",
-    search_bus_routes: "查詢公車路線",
-    search_train_schedule: "查詢台鐵時刻",
-  };
-  return labels[name] || name;
+function ActivityPanel({
+  items,
+  compact = false,
+}: {
+  items: ActivityItem[];
+  compact?: boolean;
+}) {
+  const toolItems = items.filter((item) => item.type === "tool");
+  if (toolItems.length === 0 && compact) return null;
+
+  return (
+    <div className={`${styles.activityPanel} ${compact ? styles.activityCompact : ""}`}>
+      {!compact && <div className={styles.activityTitle}>資料來源</div>}
+      {toolItems.map((tool) => (
+        <div
+          key={tool.id}
+          className={`${styles.activityItem} ${styles[tool.status || "running"]}`}
+        >
+          <div className={styles.activityTop}>
+            <span className={styles.activityIcon}>
+              {tool.status === "done" ? "✓" : tool.status === "error" ? "!" : "↻"}
+            </span>
+            <span className={styles.activityLabel}>{tool.label || tool.name}</span>
+            {tool.provider && <span className={styles.sourceBadge}>{tool.provider}</span>}
+          </div>
+
+          {tool.source && <div className={styles.activitySource}>{tool.source}</div>}
+
+          {tool.input && (
+            <div className={styles.activityInput}>
+              {Object.entries(tool.input)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join(" · ")}
+            </div>
+          )}
+
+          {tool.status === "running" && (
+            <div className={styles.activityPending}>查詢中...</div>
+          )}
+
+          {tool.status === "done" && (
+            <div className={styles.activityResult}>
+              <span>{tool.summary}</span>
+              {tool.preview && tool.preview.length > 0 && (
+                <span className={styles.activityPreview}>｜{tool.preview.join("、")}</span>
+              )}
+            </div>
+          )}
+
+          {tool.status === "error" && (
+            <div className={styles.activityError}>{tool.summary || "查詢失敗"}</div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function isPhaseDone(step: Phase, current: Phase | null) {
+  const order: Phase[] = ["thinking", "tool", "writing", "done"];
+  const stepIdx = order.indexOf(step);
+  const currentIdx = current ? order.indexOf(current) : -1;
+  return currentIdx > stepIdx;
 }
