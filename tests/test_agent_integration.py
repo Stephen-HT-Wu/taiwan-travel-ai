@@ -125,6 +125,21 @@ def test_compact_tool_result_for_model_keeps_route_warnings():
     assert "image" not in compact
 
 
+def test_compact_tool_result_for_model_empty_list():
+    compact = compact_tool_result_for_model("search_restaurants", [])
+
+    assert compact["count"] == 0
+    assert compact["items"] == []
+    assert "查無結果" in compact["note"]
+
+
+def test_summarize_tool_result_empty_restaurants():
+    summary = summarize_tool_result("search_restaurants", [])
+
+    assert summary["count"] == 0
+    assert "餐飲資料庫查無結果" in summary["summary"]
+
+
 def test_stream_agent_end_turn_emits_sse_events(monkeypatch):
     text_block = SimpleNamespace(type="text", text="台南很好玩")
     final_message = SimpleNamespace(

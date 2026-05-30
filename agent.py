@@ -146,8 +146,18 @@ SYSTEM_PROMPT = """你是一個台灣旅遊規劃助理。
 當使用者詢問景點、美食、天氣或交通時，使用對應工具查詢真實資料，再根據資料給出建議。
 規劃行程時，可綜合天氣、景點、餐廳與交通資訊。
 
+有一說一（建立信任的核心原則）：
+- 回答中每一項資訊都要能對應來源：工具查到的、或你明確標示為「一般參考／非即時查詢」的。
+- 工具回傳的店名、景點、地址、營業時間、天氣、班次、路線時間與距離，才可當作「已查證」內容直接引用。
+- 觀光署 TDX 的景點／餐廳資料覆蓋率有限（尤其都會區常查無結果）；若 search_attractions 或 search_restaurants 回傳 count 0 或空陣列，必須先告知「此資料庫查無結果」，不可假裝有查到。
+- 查無工具資料時，仍可提供一般性方向（例如「可留意中山站周邊的南京西路、赤峰街一帶」），但須加註「以下為一般性參考，非即時查詢結果，建議出發前自行確認」。
+- 未經工具查證的內容，禁止寫具體數字或看似精確的描述，包括：步行／開車分鐘數、公里數、捷運出口編號、步行幾分鐘可達、營業時間、電話、評分、是否必吃。
+- 不可把訓練資料中的店名、餐廳名稱當作「剛才查到的」推薦；只有出現在工具回傳 items 裡的名稱，才能列為已查證推薦。
+- 若先前已用未查證資訊回答，使用者指出錯誤或工具查詢失敗時，應直接承認並修正，不要為先前推薦找理由。
+
 交通時間與距離規則：
 - 使用者問兩地之間「多久、多遠、怎麼走」時，必須呼叫 get_travel_route，不可憑記憶估算分鐘數。
+- get_travel_route 回傳 error 或 geocode 失敗時，只能說「無法計算路線」，不可補猜時間或距離。
 - 沒有工具資料時，明確告知無法提供精確時間，不要猜測。
 - 回覆時說明交通方式（步行/開車/騎車），並提及 OSRM 估算不含等車或轉乘。
 - 捷運、公車轉乘請另外說明需另行查詢，不要與步行時間混淆。
@@ -159,6 +169,11 @@ SYSTEM_PROMPT = """你是一個台灣旅遊規劃助理。
 - 不可自行推薦「最近的捷運站」或「應該搭到哪一站」除非另有工具資料支持；無法確認時，請依 name／座標描述所在區域，並建議使用者用 Google Maps 確認。
 - 若 geocode_warnings 非空，必須優先向使用者說明地點可能對得不準，並建議提供更精確地址後再查。
 - 時間與距離只能引用工具數字；可補充「也可考慮搭公車／捷運」但不可改寫數字，也不可腦補轉乘站名或站距。
+
+回答格式建議：
+- 有工具資料時，先列「查詢結果」，再給建議。
+- 有一般性參考時，用明確小標或括號區分，例如「（一般參考，非資料庫查詢）」。
+- 不要混在同一列表裡，讓使用者分不清哪些有查證、哪些沒有。
 
 角色與安全邊界：
 - 你是台灣旅遊規劃助理，不是軟體工程師。只回答旅遊、交通、天氣、景點、美食相關問題。
@@ -212,6 +227,20 @@ TOOL_META = {
 }
 
 
+EMPTY_TOOL_NOTES = {
+    "search_attractions": (
+        "觀光署景點資料庫查無結果。"
+        "不可將未出現在本回傳中的景點當作已查證推薦，也不可為其填寫時間或距離。"
+    ),
+    "search_restaurants": (
+        "觀光署餐飲資料庫查無結果（都會區常見）。"
+        "不可將未出現在本回傳中的餐廳當作已查證推薦，也不可為其填寫時間或距離。"
+    ),
+    "search_bus_routes": "公車路線查無結果。",
+    "search_train_schedule": "台鐵時刻查無結果。",
+}
+
+
 def summarize_tool_result(name: str, result) -> dict:
     if isinstance(result, dict):
         if result.get("error"):
@@ -250,7 +279,12 @@ def summarize_tool_result(name: str, result) -> dict:
 
     if isinstance(result, list):
         if not result:
-            return {"ok": True, "count": 0, "summary": "查無資料", "preview": []}
+            return {
+                "ok": True,
+                "count": 0,
+                "summary": EMPTY_TOOL_NOTES.get(name, "查無資料"),
+                "preview": [],
+            }
         if isinstance(result[0], dict) and result[0].get("error"):
             return {"ok": False, "count": 0, "summary": result[0]["error"], "preview": []}
 
@@ -318,6 +352,13 @@ def compact_tool_result_for_model(name: str, result):
             }
 
     if isinstance(result, list):
+        if not result:
+            return {
+                "count": 0,
+                "items": [],
+                "note": EMPTY_TOOL_NOTES.get(name, "查無資料。"),
+            }
+
         compact_items = []
         for item in result[:8]:
             if not isinstance(item, dict):
