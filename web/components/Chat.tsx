@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect, FormEvent, KeyboardEvent } from "react";
 import dynamic from "next/dynamic";
 import styles from "./Chat.module.css";
+import MarkdownContent from "./MarkdownContent";
 import type { MapPlace, MapPlaceInput } from "./mapTypes";
 
 const MapPanel = dynamic(() => import("./MapPanel"), { ssr: false });
@@ -271,7 +272,13 @@ export default function Chat() {
         {messages.map((msg, i) => (
           <div key={i}>
             <div className={`${styles.message} ${styles[msg.role]}`}>
-              <div className={styles.bubble}>{msg.content}</div>
+              <div className={styles.bubble}>
+                {msg.role === "assistant" ? (
+                  <MarkdownContent content={msg.content} />
+                ) : (
+                  msg.content
+                )}
+              </div>
             </div>
             {msg.activities && msg.activities.length > 0 && (
               <ActivityPanel items={msg.activities} compact />
@@ -310,7 +317,7 @@ export default function Chat() {
         {streamingText && (
           <div className={`${styles.message} ${styles.assistant}`}>
             <div className={styles.bubble}>
-              {streamingText}
+              <MarkdownContent content={streamingText} />
               <span className={styles.cursor}>▊</span>
             </div>
           </div>

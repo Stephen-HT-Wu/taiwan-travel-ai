@@ -1,7 +1,13 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from agent import execute_tool, extract_map_places, stream_agent, summarize_tool_result
+from agent import (
+    compact_tool_result_for_model,
+    execute_tool,
+    extract_map_places,
+    stream_agent,
+    summarize_tool_result,
+)
 from tests.conftest import FakeAnthropicStream, tdx_get_handler
 
 
@@ -80,6 +86,43 @@ def test_extract_map_places_skips_items_without_coordinates():
     places = extract_map_places("search_restaurants", [{"name": "無座標"}])
 
     assert places == []
+
+
+def test_compact_tool_result_for_model_strips_verbose_fields():
+    compact = compact_tool_result_for_model(
+        "search_attractions",
+        [{
+            "name": "赤崁樓",
+            "description": "x" * 200,
+            "address": "臺南市",
+            "image": "https://example.com/photo.jpg",
+            "lat": 22.997,
+            "lng": 120.202,
+        }],
+    )
+
+    assert compact[0]["name"] == "赤崁樓"
+    assert len(compact[0]["description"]) <= 121
+    assert "image" not in compact[0]
+
+
+def test_compact_tool_result_for_model_keeps_route_warnings():
+    compact = compact_tool_result_for_model(
+        "get_travel_route",
+        {
+            "origin": {"query": "捷運中山站", "name": "中山站", "lat": 25.05, "lng": 121.52},
+            "destination": {"query": "雙城街夜市", "name": "晴光市場", "lat": 25.06, "lng": 121.53},
+            "mode_label": "步行",
+            "duration_minutes": 28,
+            "distance_km": 2.3,
+            "geocode_warnings": ["終點「雙城街夜市」已對應至：晴光市場"],
+            "note": "測試",
+        },
+    )
+
+    assert compact["geocode_warnings"]
+    assert compact["duration_minutes"] == 28
+    assert "image" not in compact
 
 
 def test_stream_agent_end_turn_emits_sse_events(monkeypatch):
