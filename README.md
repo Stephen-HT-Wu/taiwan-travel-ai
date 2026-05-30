@@ -9,8 +9,10 @@
 - 依縣市搜尋景點、古蹟、美食（**OpenStreetMap**，主資料源）
 - 觀光署 TDX 登錄景點／餐飲（官方補充，覆蓋率有限）
 - 36 小時天氣預報（中央氣象署）
-- 市區公車路線、台鐵時刻表（TDX）
+- 市區公車路線、台鐵/高鐵時刻表（TDX）
 - 兩地步行／開車／騎車路線時間（OSRM + Nominatim）
+- **行程多段移動時間**（`get_itinerary_legs`，一日遊時段表）
+- **附近公車/捷運站**與**簡化大眾運輸段估算**（TDX + OSRM，同路線直達／捷運 OD，不含複雜轉乘）
 
 ### Web 介面
 
@@ -35,10 +37,10 @@ Next.js（:3000）──SSE proxy──→ FastAPI（:8000）
     ↓                              ↓
 Leaflet 地圖 / Chat UI         LLM Provider（Anthropic | Gemini）
                                     ↓ Tool Use
-               ┌──────────────┬──────────────┬──────────────┬─────────────┐
-               │ OSM Places   │ TDX 交通/登錄 │ CWA 天氣     │ OSRM 路線   │
-               │ (Overpass)   │              │              │ (Nominatim) │
-               └──────────────┴──────────────┴──────────────┴─────────────┘
+               ┌──────────────┬──────────────┬──────────────┬─────────────┬────────────┐
+               │ OSM Places   │ TDX 交通/登錄 │ CWA 天氣     │ OSRM 路線   │ TDX 轉運   │
+               │ (Overpass)   │              │              │ (Nominatim) │ (transit)  │
+               └──────────────┴──────────────┴──────────────┴─────────────┴────────────┘
                                     ↓
                LLM 整合 → SSE 串流（status / tool_* / text_delta / done）
 ```
@@ -53,6 +55,7 @@ taiwan-travel-ai/
 ├── osm_places.py            # OSM Nominatim + Overpass POI
 ├── tdx.py / cwa.py          # TDX、氣象署
 ├── routing.py               # Nominatim geocoding + OSRM
+├── transit.py               # TDX 公車/捷運站與段時間估算
 ├── main.py                  # CLI 入口
 ├── web/
 │   ├── app/api/chat/        # Next.js SSE proxy → 後端
@@ -125,6 +128,8 @@ python3 main.py
 | 子區域 | 花蓮市有什麼餐廳？ | `search_places`（keyword） | 縣市 + 區名縮小 Overpass 範圍 |
 | 台鐵 | 明天台北到台南有哪些班次？ | `search_train_schedule` | TDX 即時班次 |
 | 路線 | 從捷運中山站到 OO 步行多久？ | `get_travel_route` | geocode 警告、不腦補時間 |
+| 一日遊 | 台北到嘉義一日遊，含時段 | `search_places` + `get_itinerary_legs` + 高鐵 | 時段表、地圖 link |
+| 大眾運輸 | 兩景點能搭公車嗎？ | `estimate_transit_segment` | 僅同路線直達；轉乘會標示無法估算 |
 | 天氣 | 台北明天天氣如何？ | `get_weather_forecast` | CWA 36 小時預報 |
 
 ## Tools 一覽
@@ -137,7 +142,13 @@ python3 main.py
 | `get_weather_forecast` | CWA | 36 小時天氣 |
 | `search_bus_routes` | TDX | 市區公車 |
 | `search_train_schedule` | TDX | 台鐵時刻 |
-| `get_travel_route` | OSRM / Nominatim | 路線時間 |
+| `search_hsr_schedule` | TDX | 高鐵時刻 |
+| `get_travel_route` | OSRM / Nominatim | 單段路線時間 |
+| `get_itinerary_legs` | OSRM / Nominatim | 行程多段移動時間 |
+| `search_nearby_transit_stops` | TDX | 附近公車/捷運站 |
+| `estimate_transit_segment` | TDX + OSRM | 大眾運輸段估算（簡化） |
+
+`estimate_transit_segment` 限制：僅支援同路線公車直達或同系統捷運 OD；不含等車、轉乘與即時誤點。首次查某縣市公車站牌會快取 TDX 整包資料。
 
 ## 測試與 CI
 

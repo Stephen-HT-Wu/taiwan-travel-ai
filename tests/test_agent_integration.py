@@ -165,6 +165,9 @@ def test_should_require_place_tools_for_itinerary_queries():
 
 
 def test_stream_agent_nudges_place_tools_after_transport_weather(monkeypatch, mock_httpx):
+    from tests.test_routing_integration import osrm_handler
+
+    mock_httpx["get_handlers"].append(osrm_handler(800, 600))
     weather_block = ToolUseBlock(
         type="tool_use",
         id="toolu_w",
@@ -196,6 +199,20 @@ def test_stream_agent_nudges_place_tools_after_transport_weather(monkeypatch, mo
                 "result": TurnResult(stop_reason="tool_use", content=[places_block]),
             },
             {
+                "events": [{"event": "tool_use_start"}],
+                "result": TurnResult(
+                    stop_reason="tool_use",
+                    content=[
+                        ToolUseBlock(
+                            type="tool_use",
+                            id="toolu_l",
+                            name="get_itinerary_legs",
+                            input={"stops": [{"name": "高鐵嘉義站"}, {"name": "噴水雞肉飯"}]},
+                        )
+                    ],
+                ),
+            },
+            {
                 "events": [{"event": "text_delta", "text": "嘉義"}],
                 "result": TurnResult(
                     stop_reason="end_turn",
@@ -224,6 +241,68 @@ def test_stream_agent_nudges_place_tools_after_transport_weather(monkeypatch, mo
         if block.get("type") == "tool_use"
     ]
     assert "search_places" in tool_names
+
+
+def test_stream_agent_nudges_itinerary_legs_after_places(monkeypatch, mock_httpx):
+    from tests.test_routing_integration import osrm_handler
+
+    mock_httpx["get_handlers"].append(osrm_handler(800, 600))
+    places_block = ToolUseBlock(
+        type="tool_use",
+        id="toolu_p",
+        name="search_places",
+        input={"city": "Chiayi", "place_type": "attraction", "limit": 1},
+    )
+    legs_block = ToolUseBlock(
+        type="tool_use",
+        id="toolu_l",
+        name="get_itinerary_legs",
+        input={
+            "stops": [
+                {"name": "高鐵嘉義站", "lat": 23.459, "lng": 120.323},
+                {"name": "噴水雞肉飯", "lat": 23.480, "lng": 120.449},
+            ]
+        },
+    )
+
+    monkeypatch.setattr(
+        "agent.get_llm_provider",
+        lambda: make_fake_provider([
+            {
+                "events": [{"event": "tool_use_start"}],
+                "result": TurnResult(stop_reason="tool_use", content=[places_block]),
+            },
+            {
+                "events": [{"event": "tool_use_start"}],
+                "result": TurnResult(stop_reason="tool_use", content=[legs_block]),
+            },
+            {
+                "events": [{"event": "text_delta", "text": "嘉義"}],
+                "result": TurnResult(
+                    stop_reason="end_turn",
+                    content=[TextBlock(type="text", text="嘉義一日遊")],
+                ),
+            },
+        ]),
+    )
+
+    messages = []
+    list(stream_agent("幫我規劃嘉義一日遊行程", messages))
+
+    user_texts = [
+        msg["content"]
+        for msg in messages
+        if msg["role"] == "user" and isinstance(msg["content"], str)
+    ]
+    assert any("get_itinerary_legs" in text for text in user_texts)
+    tool_names = [
+        block["name"]
+        for msg in messages
+        if msg["role"] == "assistant"
+        for block in msg["content"]
+        if block.get("type") == "tool_use"
+    ]
+    assert "get_itinerary_legs" in tool_names
 
 
 def test_stream_agent_end_turn_emits_sse_events(monkeypatch):
@@ -281,7 +360,7 @@ def test_stream_agent_tool_use_emits_tool_events(monkeypatch, mock_httpx):
         ]),
     )
 
-    events = list(stream_agent("台南景點", []))
+    events = list(stream_agent("台南有什麼古蹟？", []))
 
     assert "tool_start" in [e["event"] for e in events]
     tool_end = next(e for e in events if e["event"] == "tool_end")
@@ -343,7 +422,7 @@ def test_stream_agent_stores_serializable_assistant_messages(monkeypatch, mock_h
     )
 
     messages = []
-    list(stream_agent("台南景點", messages))
+    list(stream_agent("台南有什麼古蹟？", messages))
 
     assistant_messages = [msg for msg in messages if msg["role"] == "assistant"]
     assert len(assistant_messages) == 2

@@ -11,10 +11,30 @@ def reset_tdx_token_cache():
     tdx._token_cache = None
     tdx._station_ids_cache = None
     tdx._hsr_station_ids_cache = None
+    try:
+        import transit
+
+        transit._bus_stops_cache.clear()
+        transit._stop_of_route_cache.clear()
+        transit._s2s_travel_time_cache.clear()
+        transit._metro_stations_cache.clear()
+        transit._metro_od_fare_cache.clear()
+    except ImportError:
+        pass
     yield
     tdx._token_cache = None
     tdx._station_ids_cache = None
     tdx._hsr_station_ids_cache = None
+    try:
+        import transit
+
+        transit._bus_stops_cache.clear()
+        transit._stop_of_route_cache.clear()
+        transit._s2s_travel_time_cache.clear()
+        transit._metro_stations_cache.clear()
+        transit._metro_od_fare_cache.clear()
+    except ImportError:
+        pass
 
 
 @pytest.fixture
@@ -45,6 +65,11 @@ def mock_httpx(monkeypatch):
     monkeypatch.setattr("routing.httpx.get", mock_get)
     monkeypatch.setattr("osm_places.httpx.get", mock_get)
     monkeypatch.setattr("osm_places.httpx.post", mock_post)
+    try:
+        import transit
+        monkeypatch.setattr("transit.httpx.get", mock_get)
+    except ImportError:
+        pass
     return state
 
 

@@ -167,3 +167,85 @@ def get_travel_route(
         "geocode_warnings": geocode_warnings,
         "note": "步行時間依距離以約 4.5 km/h 估算；開車/騎車為 OSRM 路線時間，不含等車或轉乘",
     }
+
+
+ITINERARY_LEGS_NOTE = (
+    "移動時間不含景點停留、不含等車或轉乘；高鐵/台鐵跨城段請另引用時刻表工具。"
+)
+
+
+def get_itinerary_legs(
+    stops: list,
+    mode: str = "walking",
+    near: str = "",
+) -> dict:
+    """
+    Compute travel time between consecutive stops in visit order.
+    Each stop: {name, lat?, lng?}. Reuses get_travel_route per leg.
+    """
+    if not isinstance(stops, list) or len(stops) < 2:
+        return {"error": "stops 至少需要 2 個地點"}
+
+    legs = []
+    all_warnings = []
+    total_minutes = 0
+    ok_legs = 0
+
+    for index in range(len(stops) - 1):
+        origin = stops[index] if isinstance(stops[index], dict) else {"name": str(stops[index])}
+        destination = stops[index + 1] if isinstance(stops[index + 1], dict) else {"name": str(stops[index + 1])}
+
+        origin_name = (origin.get("name") or "").strip()
+        dest_name = (destination.get("name") or "").strip()
+        if not origin_name or not dest_name:
+            legs.append({
+                "from": origin_name or f"stop_{index}",
+                "to": dest_name or f"stop_{index + 1}",
+                "error": "缺少地點名稱",
+            })
+            continue
+
+        leg = get_travel_route(
+            origin_name,
+            dest_name,
+            mode=mode,
+            origin_lat=origin.get("lat"),
+            origin_lng=origin.get("lng"),
+            destination_lat=destination.get("lat"),
+            destination_lng=destination.get("lng"),
+            near=near or "台灣",
+        )
+
+        if leg.get("error"):
+            legs.append({
+                "from": origin_name,
+                "to": dest_name,
+                "error": leg["error"],
+            })
+            continue
+
+        warnings = leg.get("geocode_warnings") or []
+        all_warnings.extend(warnings)
+        minutes = leg.get("duration_minutes") or 0
+        total_minutes += minutes
+        ok_legs += 1
+        legs.append({
+            "from": origin_name,
+            "to": dest_name,
+            "mode_label": leg.get("mode_label"),
+            "duration_minutes": minutes,
+            "distance_km": leg.get("distance_km"),
+            "origin": leg.get("origin"),
+            "destination": leg.get("destination"),
+            "geocode_warnings": warnings,
+        })
+
+    return {
+        "legs": legs,
+        "leg_count": len(legs),
+        "ok_legs": ok_legs,
+        "total_travel_minutes": total_minutes,
+        "mode": mode,
+        "geocode_warnings": all_warnings,
+        "note": ITINERARY_LEGS_NOTE,
+    }

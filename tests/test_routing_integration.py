@@ -1,4 +1,4 @@
-from routing import geocode_place, get_travel_route
+from routing import geocode_place, get_travel_route, get_itinerary_legs
 
 
 def nominatim_handler(query_fragment, lat, lng, display_name):
@@ -107,6 +107,29 @@ def test_get_travel_route_uses_coordinates_when_provided(mock_httpx):
 
     assert result["duration_minutes"] == 11
     assert result["distance_meters"] == 800
+
+
+def test_get_itinerary_legs_sums_multiple_stops(mock_httpx):
+    mock_httpx["get_handlers"].append(osrm_handler(800, 600))
+    mock_httpx["get_handlers"].append(osrm_handler(1200, 900))
+
+    result = get_itinerary_legs([
+        {"name": "高鐵嘉義站", "lat": 23.459, "lng": 120.323},
+        {"name": "噴水雞肉飯", "lat": 23.480, "lng": 120.449},
+        {"name": "郭家雞肉飯", "lat": 23.479, "lng": 120.450},
+    ])
+
+    assert result["ok_legs"] == 2
+    assert result["total_travel_minutes"] == 22
+    assert len(result["legs"]) == 2
+    assert result["legs"][0]["duration_minutes"] == 11
+
+
+def test_get_itinerary_legs_requires_two_stops():
+    result = get_itinerary_legs([{"name": "A"}])
+
+    assert result["error"]
+    assert "至少需要 2" in result["error"]
 
 
 def test_get_travel_route_invalid_mode(mock_httpx):

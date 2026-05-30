@@ -7,7 +7,8 @@ from dotenv import load_dotenv
 
 from tdx import search_attractions, search_restaurants, search_bus_routes, search_train_schedule, search_hsr_schedule
 from cwa import get_weather_forecast
-from routing import get_travel_route
+from routing import get_travel_route, get_itinerary_legs
+from transit import search_nearby_transit_stops, estimate_transit_segment
 from osm_places import search_places
 from providers import get_llm_provider
 from providers.base import content_blocks_to_api, sanitize_messages
@@ -196,6 +197,94 @@ tools = [
             "required": ["origin", "destination"],
         },
     },
+    {
+        "name": "get_itinerary_legs",
+        "description": (
+            "依造訪順序批次計算多個地點之間的移動時間（預設步行）。"
+            "規劃一日遊/行程時，在 search_places 選定景點後必須使用；"
+            "stops 含高鐵/台鐵站與各 POI 的 name、lat、lng。"
+            "跨城鐵路時間仍須引用 search_hsr_schedule / search_train_schedule。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "stops": {
+                    "type": "array",
+                    "description": "依序造訪的地點，每項含 name，及 search_places 回傳的 lat/lng",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "lat": {"type": "number"},
+                            "lng": {"type": "number"},
+                        },
+                        "required": ["name"],
+                    },
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "walking（預設）、driving、cycling",
+                },
+                "near": {
+                    "type": "string",
+                    "description": "地點區域提示，例如 嘉義市、臺北市",
+                },
+            },
+            "required": ["stops"],
+        },
+    },
+    {
+        "name": "search_nearby_transit_stops",
+        "description": (
+            "查詢座標附近的大眾運輸站點（公車站牌、捷運站）。"
+            "回答最近捷運/公車站，或 estimate_transit_segment 前可先查。"
+            "不含搭車時間，僅站點位置與距離。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "lat": {"type": "number", "description": "緯度"},
+                "lng": {"type": "number", "description": "經度"},
+                "city": {
+                    "type": "string",
+                    "description": "縣市英文名，例如 Taipei、Chiayi、Kaohsiung",
+                },
+                "transit_type": {
+                    "type": "string",
+                    "description": "all（預設）、bus、metro",
+                },
+                "radius_m": {"type": "integer", "description": "搜尋半徑公尺，預設 800"},
+                "limit": {"type": "integer", "description": "回傳幾筆，預設 5"},
+            },
+            "required": ["lat", "lng", "city"],
+        },
+    },
+    {
+        "name": "estimate_transit_segment",
+        "description": (
+            "估算兩座標間大眾運輸段時間（TDX 同路線公車直達或捷運 OD + 步行接驳）。"
+            "單段步行超過 15 分鐘、或使用者要求搭公車/捷運時使用。"
+            "feasible 為 false 時不可引用公車/捷運分鐘數，可改列 walking_alternative。"
+            "不支援複雜轉乘。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origin_lat": {"type": "number"},
+                "origin_lng": {"type": "number"},
+                "destination_lat": {"type": "number"},
+                "destination_lng": {"type": "number"},
+                "city": {"type": "string", "description": "縣市英文名"},
+                "origin_name": {"type": "string", "description": "起點名稱（可選）"},
+                "destination_name": {"type": "string", "description": "終點名稱（可選）"},
+                "prefer": {
+                    "type": "string",
+                    "description": "auto（預設）、bus、metro",
+                },
+            },
+            "required": ["origin_lat", "origin_lng", "destination_lat", "destination_lng", "city"],
+        },
+    },
 ]
 
 SYSTEM_PROMPT = f"""你是一個台灣旅遊規劃助理。
@@ -208,6 +297,11 @@ SYSTEM_PROMPT = f"""你是一個台灣旅遊規劃助理。
 2. 再至少各呼叫一次 search_places（place_type=attraction 與 restaurant，city 填目的地，如 Chiayi、ChiayiCounty）。
 3. 行程中列出的每個景點、餐廳名稱必須來自 search_places 回傳的 name；未查到的不可寫具體店名當作已查證推薦。
 4. 交通班次可引用 search_train_schedule / search_hsr_schedule；景點餐廳不可憑記憶補名。
+5. 選定景點/餐廳後，依造訪順序組 stops（含高鐵/台鐵站如「高鐵嘉義站」+ 各 POI 的 name/lat/lng），呼叫 get_itinerary_legs 計算市區移動時間。
+6. 跨城段引用 search_hsr_schedule / search_train_schedule 中**一班**具體車次的 departure_time / arrival_time。
+7. 回答用**時段表**（例如 08:30–09:15 搭車、09:45–11:30 景點 A）；停留時間寫「建議停留 X 分鐘（非工具查詢）」，與移動時間分開。
+8. 高鐵/台鐵到站後可加 **15 分鐘緩衝**（標示為一般參考，非工具數字）。
+9. 單段 get_itinerary_legs 超過 15 分鐘或使用者要求大眾運輸時，對該段使用 estimate_transit_segment；僅 feasible 為 true 時引用公車/捷運分鐘數。
 
 資料源優先序：
 - 景點、古蹟、美食推薦：優先使用 search_places（OpenStreetMap），結果可作為已查證推薦並顯示於地圖。
@@ -228,17 +322,19 @@ SYSTEM_PROMPT = f"""你是一個台灣旅遊規劃助理。
 - 若先前已用未查證資訊回答，使用者指出錯誤或工具查詢失敗時，應直接承認並修正，不要為先前推薦找理由。
 
 交通時間與距離規則：
-- 使用者問兩地之間「多久、多遠、怎麼走」時，必須呼叫 get_travel_route，不可憑記憶估算分鐘數。
-- get_travel_route 回傳 error 或 geocode 失敗時，只能說「無法計算路線」，不可補猜時間或距離。
+- 規劃行程時優先 get_itinerary_legs 批次計算相鄰地點移動時間；單點 A→B 仍可用 get_travel_route。
+- 使用者問兩地之間「多久、多遠、怎麼走」時，必須呼叫 get_travel_route 或 get_itinerary_legs，不可憑記憶估算分鐘數。
+- get_travel_route / get_itinerary_legs 回傳 error 或 geocode 失敗時，只能說「無法計算路線」，不可補猜時間或距離。
+- estimate_transit_segment 的 feasible 為 false 時，不可引用公車/捷運分鐘數，可改列 walking_alternative 或說明無法估算轉乘。
 - 沒有工具資料時，明確告知無法提供精確時間，不要猜測。
-- 回覆時說明交通方式（步行/開車/騎車），並提及 OSRM 估算不含等車或轉乘。
-- 捷運、公車轉乘請另外說明需另行查詢，不要與步行時間混淆。
+- 回覆時說明交通方式，並提及 OSRM/TDX 估算不含等車或轉乘。
+- 大眾運輸僅在 estimate_transit_segment 或 search_nearby_transit_stops 有資料時才可引用站名；不可與步行時間混淆。
 
 工具結果驗證規則（尤其 get_travel_route）：
 - 回答前必須閱讀工具回傳的 origin、destination 的 name、query、lat、lng，確認系統實際使用的起終點。
 - 若 query（你輸入的地名）與 name（geocoding 解析結果）明顯不同，必須在回答中清楚告知，例如：「您問的是雙城街夜市，但系統對應到晴光市場（農安街一巷），以下時間依此座標計算。」
 - 禁止用「名字相似」推論地理位置（例如：雙城街≠雙連站、中山≠中山國中），禁止用直覺覆蓋或「修正」工具回傳的座標、距離、時間。
-- 不可自行推薦「最近的捷運站」或「應該搭到哪一站」除非另有工具資料支持；無法確認時，請依 name／座標描述所在區域，並建議使用者用 Google Maps 確認。
+- 不可自行推薦「最近的捷運站」或「應該搭到哪一站」除非 search_nearby_transit_stops 或 estimate_transit_segment 有資料支持；無法確認時，請依 name／座標描述所在區域，並建議使用者用 Google Maps 確認。
 - 若 geocode_warnings 非空，必須優先向使用者說明地點可能對得不準，並建議提供更精確地址後再查。
 - 時間與距離只能引用工具數字；可補充「也可考慮搭公車／捷運」但不可改寫數字，也不可腦補轉乘站名或站距。
 
@@ -265,6 +361,9 @@ TOOL_HANDLERS = {
     "search_train_schedule": search_train_schedule,
     "search_hsr_schedule": search_hsr_schedule,
     "get_travel_route": get_travel_route,
+    "get_itinerary_legs": get_itinerary_legs,
+    "search_nearby_transit_stops": search_nearby_transit_stops,
+    "estimate_transit_segment": estimate_transit_segment,
 }
 
 TOOL_META = {
@@ -308,6 +407,21 @@ TOOL_META = {
         "source": "OSRM 路線估算",
         "provider": "OpenStreetMap",
     },
+    "get_itinerary_legs": {
+        "label": "行程路段時間",
+        "source": "OSRM 多段路線",
+        "provider": "OpenStreetMap",
+    },
+    "search_nearby_transit_stops": {
+        "label": "附近站點",
+        "source": "TDX 公車/捷運站",
+        "provider": "交通部 TDX",
+    },
+    "estimate_transit_segment": {
+        "label": "大眾運輸段估算",
+        "source": "TDX 站間時間 + OSRM",
+        "provider": "交通部 TDX",
+    },
 }
 
 
@@ -327,6 +441,7 @@ EMPTY_TOOL_NOTES = {
     "search_bus_routes": "公車路線查無結果。",
     "search_train_schedule": "台鐵時刻查無結果。",
     "search_hsr_schedule": "高鐵時刻查無結果。",
+    "search_nearby_transit_stops": "附近查無公車或捷運站。",
 }
 
 
@@ -364,6 +479,38 @@ def summarize_tool_result(name: str, result) -> dict:
                     f"{result.get('distance_km')} 公里）"
                 ),
                 "preview": preview,
+            }
+        if name == "get_itinerary_legs":
+            preview = [
+                f"{leg.get('from', '')} → {leg.get('to', '')}"
+                for leg in (result.get("legs") or [])[:3]
+                if not leg.get("error")
+            ]
+            return {
+                "ok": result.get("ok_legs", 0) > 0,
+                "count": result.get("ok_legs", 0),
+                "summary": (
+                    f"共 {result.get('leg_count', 0)} 段，"
+                    f"移動合計約 {result.get('total_travel_minutes', 0)} 分鐘"
+                ),
+                "preview": preview,
+            }
+        if name == "estimate_transit_segment":
+            if result.get("feasible"):
+                preview = [f"{result.get('mode', '')} 約 {result.get('total_minutes')} 分鐘"]
+                if result.get("route_name"):
+                    preview.append(result["route_name"])
+                return {
+                    "ok": True,
+                    "count": 1,
+                    "summary": f"大眾運輸約 {result.get('total_minutes')} 分鐘",
+                    "preview": preview,
+                }
+            return {
+                "ok": False,
+                "count": 0,
+                "summary": result.get("reason", "無法估算大眾運輸"),
+                "preview": [],
             }
 
     if isinstance(result, list):
@@ -439,6 +586,46 @@ def compact_tool_result_for_model(name: str, result):
                 "geocode_warnings": result.get("geocode_warnings") or [],
                 "note": result.get("note"),
             }
+        if name == "get_itinerary_legs":
+            compact_legs = []
+            for leg in (result.get("legs") or [])[:COMPACT_LIST_LIMIT]:
+                if leg.get("error"):
+                    compact_legs.append({
+                        "from": leg.get("from"),
+                        "to": leg.get("to"),
+                        "error": leg.get("error"),
+                    })
+                else:
+                    compact_legs.append({
+                        "from": leg.get("from"),
+                        "to": leg.get("to"),
+                        "mode_label": leg.get("mode_label"),
+                        "duration_minutes": leg.get("duration_minutes"),
+                        "distance_km": leg.get("distance_km"),
+                        "geocode_warnings": leg.get("geocode_warnings") or [],
+                    })
+            return {
+                "legs": compact_legs,
+                "total_travel_minutes": result.get("total_travel_minutes"),
+                "ok_legs": result.get("ok_legs"),
+                "geocode_warnings": result.get("geocode_warnings") or [],
+                "note": result.get("note"),
+            }
+        if name == "estimate_transit_segment":
+            compact = {
+                "feasible": result.get("feasible"),
+                "mode": result.get("mode"),
+                "total_minutes": result.get("total_minutes"),
+                "data_source": result.get("data_source"),
+                "limitations": result.get("limitations") or [],
+            }
+            if not result.get("feasible"):
+                compact["reason"] = result.get("reason")
+                compact["walking_minutes"] = result.get("walking_minutes")
+            else:
+                compact["segments"] = result.get("segments") or []
+                compact["route_name"] = result.get("route_name")
+            return compact
 
     if isinstance(result, list):
         if not result:
@@ -505,6 +692,14 @@ def compact_tool_result_for_model(name: str, result):
                     "date": item.get("date"),
                     "origin": item.get("origin"),
                     "destination": item.get("destination"),
+                })
+            elif name == "search_nearby_transit_stops":
+                compact_items.append({
+                    "type": item.get("type"),
+                    "name": item.get("name"),
+                    "distance_m": item.get("distance_m"),
+                    "lat": item.get("lat"),
+                    "lng": item.get("lng"),
                 })
             else:
                 compact_items.append(item)
@@ -627,6 +822,16 @@ PLACE_TOOLS_NUDGE = (
     "完成後再撰寫行程；推薦名稱必須來自 search_places 回傳，以便地圖與內文連結顯示。"
 )
 
+ITINERARY_LEGS_NUDGE = (
+    "請依造訪順序組 stops（含高鐵/台鐵站與各 POI 的 name、lat、lng），"
+    "呼叫 get_itinerary_legs 計算市區移動時間後再撰寫時段表行程。"
+    "跨城段仍須引用 search_hsr_schedule 或 search_train_schedule 的具體班次時間。"
+)
+
+
+def _should_require_itinerary_legs(user_message: str) -> bool:
+    return _should_require_place_tools(user_message)
+
 
 def stream_agent(user_message: str, messages: list) -> Generator[dict, None, None]:
     """串流版 agent，yield SSE 事件 dict"""
@@ -638,6 +843,9 @@ def stream_agent(user_message: str, messages: list) -> Generator[dict, None, Non
     place_tools_called = False
     place_tools_post_tool_nudge_sent = False
     place_tools_end_turn_nudge_sent = False
+    itinerary_legs_called = False
+    itinerary_legs_post_tool_nudge_sent = False
+    itinerary_legs_end_turn_nudge_sent = False
 
     while True:
         if _last_message_is_tool_results(messages):
@@ -685,6 +893,7 @@ def stream_agent(user_message: str, messages: list) -> Generator[dict, None, Non
         tool_blocks = [block for block in turn.content if block.type == "tool_use"]
         if tool_blocks:
             place_tools_called |= any(block.name in MAP_TOOL_NAMES for block in tool_blocks)
+            itinerary_legs_called |= any(block.name == "get_itinerary_legs" for block in tool_blocks)
 
         if turn.stop_reason == "end_turn":
             if (
@@ -694,6 +903,15 @@ def stream_agent(user_message: str, messages: list) -> Generator[dict, None, Non
             ):
                 place_tools_end_turn_nudge_sent = True
                 messages.append({"role": "user", "content": PLACE_TOOLS_NUDGE})
+                continue
+            if (
+                _should_require_itinerary_legs(user_message)
+                and place_tools_called
+                and not itinerary_legs_called
+                and not itinerary_legs_end_turn_nudge_sent
+            ):
+                itinerary_legs_end_turn_nudge_sent = True
+                messages.append({"role": "user", "content": ITINERARY_LEGS_NUDGE})
                 continue
             yield {"event": "status", "data": {"phase": "done", "message": "完成"}}
             yield {"event": "done", "data": {}}
@@ -753,3 +971,11 @@ def stream_agent(user_message: str, messages: list) -> Generator[dict, None, Non
         ):
             place_tools_post_tool_nudge_sent = True
             messages.append({"role": "user", "content": PLACE_TOOLS_NUDGE})
+        elif (
+            _should_require_itinerary_legs(user_message)
+            and place_tools_called
+            and not itinerary_legs_called
+            and not itinerary_legs_post_tool_nudge_sent
+        ):
+            itinerary_legs_post_tool_nudge_sent = True
+            messages.append({"role": "user", "content": ITINERARY_LEGS_NUDGE})
